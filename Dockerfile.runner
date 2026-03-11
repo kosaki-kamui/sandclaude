@@ -1,0 +1,41 @@
+# Pin to specific minor version for reproducibility. Update deliberately.
+FROM python:3.12.11-slim
+
+# System dependencies including iptables for network isolation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    nodejs \
+    npm \
+    iptables \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for agent phase (Claude Code refuses --dangerously-skip-permissions as root)
+RUN useradd -m -u 1000 -s /bin/bash agent
+
+# Install Claude CLI — pin exact version for reproducibility and supply-chain safety.
+# Bump this deliberately when upgrading; do not use floating tags.
+ARG CLAUDE_CODE_VERSION=1.0.33
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Install Python dependencies (pin versions for reproducibility)
+RUN pip install --no-cache-dir 'claude-agent-sdk>=0.1,<1' 'pydantic>=2.10,<3' 'aiosqlite>=0.20,<1'
+
+# Copy application code
+RUN mkdir -p /app
+COPY src/sandclaude/runner/executor.py /app/executor.py
+COPY src/sandclaude/runner/entrypoint.py /app/entrypoint.py
+COPY src/sandclaude/models.py /app/models.py
+
+# Make sandclaude importable from /app
+RUN mkdir -p /app/sandclaude/runner && \
+    cp /app/models.py /app/sandclaude/models.py && \
+    cp /app/executor.py /app/sandclaude/runner/executor.py && \
+    touch /app/sandclaude/__init__.py /app/sandclaude/runner/__init__.py
+
+ENV PYTHONPATH=/app
+
+WORKDIR /workspace
+
+ENTRYPOINT ["python", "/app/entrypoint.py"]

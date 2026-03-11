@@ -1,0 +1,59 @@
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - NETWORKS=1
+      - POST=1
+      - INFO=1
+      - PING=1
+      - VERSION=1
+      - ALLOW_START=1
+      - ALLOW_STOP=1
+      - EXEC=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - setup-net
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    depends_on:
+      - socket-proxy
+    ports:
+      - "${PORT:-3271}:3271"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - PORT=3271
+      - DATA_DIR=/app/data
+      - HOST_CWD=${HOST_CWD:-${PWD}}
+      - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
+      - ALLOWED_REPO_BASE=${ALLOWED_REPO_BASE:-}
+      - DOCKER_HOST=tcp://socket-proxy:2375
+    networks:
+      - setup-net
+      - agent-net
+    restart: unless-stopped
+
+# Runner containers are spawned dynamically by the API server via docker-py.
+# They are NOT defined here.
+
+networks:
+  # Setup phase: full internet access for git clone, npm install, pip install
+  setup-net:
+    name: sandclaude-setup-net
+    driver: bridge
+
+  # Agent phase: regular bridge (NOT internal:true - that blocks api.anthropic.com).
+  # Isolation enforced via in-container iptables rules applied by container.py.
+  # The api service is attached to ensure Compose creates this network on startup.
+  agent-net:
+    name: sandclaude-agent-net
+    driver: bridge

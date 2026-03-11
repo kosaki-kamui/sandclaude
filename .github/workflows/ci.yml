@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git config --local gc.auto 0
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force --detach FETCH_HEAD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install ".[dev]"
+
+      - name: Lint
+        run: ruff check src/ tests/
+
+      - name: Format check
+        run: ruff format --check src/ tests/
+
+      - name: Type check
+        run: mypy src/
+
+      - name: Run tests (non-Docker)
+        run: pytest --ignore=tests/test_docker_integration.py
+
+  docker-test:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git config --local gc.auto 0
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force --detach FETCH_HEAD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install ".[dev]"
+
+      - name: Create Docker networks
+        run: |
+          docker network create sandclaude-setup-net
+          docker network create sandclaude-agent-net
+
+      - name: Build runner image
+        run: docker build -t sandclaude-runner -f Dockerfile.runner .
+
+      - name: Run Docker integration tests
+        run: pytest tests/test_docker_integration.py -v

@@ -1,0 +1,567 @@
+"""
+sandclaude API Server (FastAPI).
+
+Endpoints:
+- POST /tasks              - Submit a new task
+- GET  /tasks              - List tasks visible to the caller token
+- GET  /tasks/{task_id}    - Get task details + results
+- POST /tasks/{task_id}/cancel    - Cancel a running task
+- GET  /tasks/{task_id}/diff        - Get the generated diff
+- GET  /tasks/{task_id}/audit      - Get the audit log
+- GET  /tasks/{task_id}/result     - Get the result summary
+- GET  /tasks/{task_id}/transcript - Get the full transcript
+- POST /tasks/{task_id}/create-pr  - Create a GitHub PR
+- GET  /pool               - Runner pool stats
+- GET  /health             - Health check (no auth)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os as _os
+import re
+import secrets as _secrets
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException, WebSocket
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from sandclaude.auth import init_token, token_fingerprint, verify_token
+from sandclaude.config import settings
+from sandclaude.db import store as db
+from sandclaude.github import create_pr
+from sandclaude.models import CreatePRRequest, TaskCreateRequest, TaskPriority, TaskStatus
+from sandclaude.runner.container import cancel_container, recover_orphans
+from sandclaude.runner.pool import get_pool_stats, submit_task
+
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+CREATE_RATE_LIMIT_WINDOW_S = 60
+CREATE_RATE_LIMIT_MAX_REQUESTS = 20
+# F4: Use token fingerprint as key (bounded by number of valid tokens).
+# NOTE: Rate limit state is process-local. Running with multiple uvicorn workers
+# multiplies the effective limit by the worker count. The default Docker CMD uses
+# a single worker. If you need multi-worker, move rate limiting to Redis/DB.
+_create_rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+_RATE_BUCKET_MAX_SIZE = 1000  # Cap total tracked fingerprints
+
+
+_MAX_ARTIFACT_BYTES = 20_000_000  # 20MB hard cap for artifact file reads
+
+
+async def _read_file_async(path, max_bytes: int = _MAX_ARTIFACT_BYTES) -> str:
+    """F1: Non-blocking file read with size guard."""
+    size = await asyncio.to_thread(path.stat)
+    if size.st_size > max_bytes:
+        raise HTTPException(status_code=413, detail="Artifact too large to serve")
+    return await asyncio.to_thread(path.read_text)
+
+
+async def _read_json_async(path, max_bytes: int = _MAX_ARTIFACT_BYTES) -> dict | list:
+    """F1: Non-blocking JSON file read with size guard."""
+    size = await asyncio.to_thread(path.stat)
+    if size.st_size > max_bytes:
+        raise HTTPException(status_code=413, detail="Artifact too large to serve")
+    text = await asyncio.to_thread(path.read_text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=502,
+            detail="Artifact file is corrupted or partially written",
+        )
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Startup: init DB, auth, recover orphans."""
+    if not settings.anthropic_api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is required. Set it in .env or environment.")
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    await db.init_db()
+    init_token()
+    print(f"[server] Data directory: {settings.data_dir.resolve()}")
+    # Block multi-worker startup — pool and rate limit state is process-local.
+    # Check both WEB_CONCURRENCY env var and uvicorn --workers CLI arg.
+    web_concurrency = _os.environ.get("WEB_CONCURRENCY", "1")
+    if web_concurrency != "1":
+        raise RuntimeError(
+            f"WEB_CONCURRENCY={web_concurrency} is not supported. "
+            "sandclaude requires a single worker because pool scheduling, "
+            "rate limiting, and background task state are process-local. "
+            "Remove WEB_CONCURRENCY or set it to 1."
+        )
+    import sys as _sys
+
+    argv = _sys.argv
+    for i, arg in enumerate(argv):
+        # Handle both --workers N and --workers=N forms
+        workers_val: str | None = None
+        if arg == "--workers" and i + 1 < len(argv):
+            workers_val = argv[i + 1]
+        elif arg.startswith("--workers="):
+            workers_val = arg.split("=", 1)[1]
+        if workers_val is not None and workers_val != "1":
+            raise RuntimeError(
+                f"--workers {workers_val} is not supported. "
+                "sandclaude requires a single worker. Remove --workers or set it to 1."
+            )
+    try:
+        await recover_orphans()
+    except Exception as exc:
+        print(f"[server] Warning: orphan recovery failed: {exc}")
+    if settings.task_retention_days > 0:
+        count = await db.cleanup_old_tasks(settings.task_retention_days)
+        if count:
+            days = settings.task_retention_days
+            print(f"[server] Cleaned up {count} tasks older than {days}d")
+    yield
+
+
+app = FastAPI(title="sandclaude", version="0.1.0", lifespan=lifespan)
+security = HTTPBearer(auto_error=False)
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """S9: Sanitize error messages to avoid leaking internal paths/config."""
+    msg = str(exc)
+    # Strip absolute file paths (Unix and Windows-style)
+    msg = re.sub(r"(?:/[^\s:\"']+)+/?", "<path>", msg)
+    msg = re.sub(r"(?:[A-Za-z]:\\[^\s:\"']+)+\\?", "<path>", msg)
+    # Truncate
+    if len(msg) > 500:
+        msg = msg[:500] + "..."
+    return msg
+
+
+# ── Auth dependency ────────────────────────────────────────────
+
+
+def _require_auth(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    verify_token(credentials.credentials)
+    return credentials.credentials
+
+
+def _validate_task_id(task_id: str) -> None:
+    if not TASK_ID_RE.match(task_id) or "/" in task_id or "\\" in task_id or ".." in task_id:
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+
+
+def _check_create_rate_limit(token: str) -> None:
+    # F4: Use fingerprint as key so bucket count is bounded by valid tokens
+    fp = token_fingerprint(token)
+    now = time.monotonic()
+
+    # Evict oldest entries if too many fingerprints tracked (instead of clearing all)
+    if len(_create_rate_buckets) > _RATE_BUCKET_MAX_SIZE:
+        cutoff = now - CREATE_RATE_LIMIT_WINDOW_S
+        stale = [k for k, v in _create_rate_buckets.items() if not v or v[-1] < cutoff]
+        for k in stale:
+            del _create_rate_buckets[k]
+
+    bucket = _create_rate_buckets[fp]
+    cutoff = now - CREATE_RATE_LIMIT_WINDOW_S
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= CREATE_RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for task creation")
+    bucket.append(now)
+
+
+def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
+    """Verify the caller owns this task.
+
+    Returns 404 (not 403) on ownership mismatch to prevent cross-tenant
+    task ID enumeration — an attacker cannot distinguish "task exists but
+    not yours" from "task doesn't exist".
+
+    Legacy/migrated tasks with NULL owner_token_hash are NOT open-access —
+    they are restricted to the primary server token only.
+    """
+    caller_fp = token_fingerprint(token)
+    if not task_owner_hash:
+        # Legacy row: only the primary server token (first candidate) may access.
+        from sandclaude.auth import get_token
+
+        primary_fp = token_fingerprint(get_token())
+        if caller_fp != primary_fp:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return
+    if task_owner_hash != caller_fp:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+
+# ── Health ─────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "version": "0.1.0"}
+
+
+# ── Pool stats ─────────────────────────────────────────────────
+
+
+@app.get("/pool", dependencies=[Depends(_require_auth)])
+async def pool_stats() -> dict:
+    return await get_pool_stats()
+
+
+# ── POST /tasks ────────────────────────────────────────────────
+
+
+@app.post("/tasks", status_code=201)
+async def create_task_endpoint(
+    request: TaskCreateRequest, token: str = Depends(_require_auth)
+) -> dict:
+    _check_create_rate_limit(token)
+
+    # Validate repo: must be ".", an absolute path, or a secure remote URL
+    repo = request.repo
+    is_remote = repo.startswith(("https://", "git@"))
+    is_dot = repo == "."
+    is_absolute = repo.startswith("/")
+    if repo.startswith("http://"):
+        raise HTTPException(
+            status_code=400,
+            detail="Plaintext http:// Git URLs are not allowed. Use https:// or git@ instead.",
+        )
+    if not (is_remote or is_dot or is_absolute):
+        raise HTTPException(
+            status_code=400,
+            detail="repo must be '.', an absolute path (e.g., /home/user/project), or a git URL.",
+        )
+
+    task_id = f"task-{_secrets.token_hex(8)}"
+    task = await db.create_task(
+        task_id=task_id,
+        repo=request.repo,
+        branch=request.branch,
+        prompt=request.prompt,
+        model=request.model or "claude-sonnet-4-5",
+        max_turns=request.max_turns or 50,
+        priority=request.priority or TaskPriority.normal,
+        owner_token_hash=token_fingerprint(token),
+        host_cwd=request.host_cwd,
+        allowed_domains=request.allowed_domains,
+        notify_webhook=request.notify.webhook if request.notify else None,
+        notify_on=request.notify.on if request.notify else None,
+    )
+
+    await submit_task(task)
+    return task.safe_dump()  # S11: exclude internal fields
+
+
+# ── GET /tasks ─────────────────────────────────────────────────
+
+
+@app.get("/tasks")
+async def list_tasks_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+    from sandclaude.auth import get_token
+
+    caller_fp = token_fingerprint(token)
+    # Primary token also sees legacy tasks with NULL owner_token_hash
+    is_primary = caller_fp == token_fingerprint(get_token())
+    tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
+    return [t.safe_dump() for t in tasks]  # S11: exclude internal fields
+
+
+# ── GET /tasks/{task_id} ───────────────────────────────────────
+
+
+@app.get("/tasks/{task_id}")
+async def get_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    result = task.safe_dump()  # S11: exclude internal fields
+    task_dir = settings.data_dir / "tasks" / task.id
+
+    # F1: async file reads
+    audit_path = task_dir / "audit.json"
+    if audit_path.exists():
+        result["audit"] = await _read_json_async(audit_path)
+
+    diff_path = task_dir / "diff.patch"
+    if diff_path.exists():
+        result["diff"] = await _read_file_async(diff_path)
+
+    return result
+
+
+# ── GET /tasks/{task_id}/diff ──────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/diff")
+async def get_diff_endpoint(task_id: str, token: str = Depends(_require_auth)):
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    diff_path = settings.data_dir / "tasks" / task.id / "diff.patch"
+    if not diff_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Diff not available (task may still be running)",
+        )
+
+    content = await _read_file_async(diff_path)  # F1
+    return PlainTextResponse(content)
+
+
+# ── GET /tasks/{task_id}/audit ─────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/audit")
+async def get_audit_endpoint(task_id: str, token: str = Depends(_require_auth)):
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    audit_path = settings.data_dir / "tasks" / task.id / "audit.json"
+    if not audit_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Audit log not available (task may still be running)",
+        )
+
+    data = await _read_json_async(audit_path)  # F1
+    return JSONResponse(data)
+
+
+# ── GET /tasks/{task_id}/result ────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/result")
+async def get_result_endpoint(task_id: str, token: str = Depends(_require_auth)):
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    result_path = settings.data_dir / "tasks" / task.id / "result.json"
+    if not result_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Result not available (task may still be running)",
+        )
+
+    data = await _read_json_async(result_path)  # F1
+    return JSONResponse(data)
+
+
+# ── GET /tasks/{task_id}/transcript ────────────────────────────
+
+
+@app.get("/tasks/{task_id}/transcript")
+async def get_transcript_endpoint(task_id: str, token: str = Depends(_require_auth)):
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    transcript_path = settings.data_dir / "tasks" / task.id / "transcript.json"
+    if not transcript_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Transcript not available (task may still be running)",
+        )
+
+    data = await _read_json_async(transcript_path)  # F1
+    return JSONResponse(data)
+
+
+# ── DELETE /tasks/{task_id} ────────────────────────────────────
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status in (TaskStatus.setup, TaskStatus.running):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a running task. Cancel it first.",
+        )
+
+    await db.delete_task(task_id)
+    return {"deleted": task_id}
+
+
+# ── POST /tasks/{task_id}/cancel ───────────────────────────────
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status not in (TaskStatus.queued, TaskStatus.setup, TaskStatus.running):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel task in status: {task.status.value}",
+        )
+
+    ok = await cancel_container(task)
+    if ok:
+        return {"status": "cancelled", "task_id": task.id}
+    # Conditional update returned False — task status changed concurrently
+    fresh = await db.get_task(task_id)
+    current_status = fresh.status.value if fresh else "deleted"
+    raise HTTPException(
+        status_code=409,
+        detail=f"Task is no longer cancellable (current status: {current_status})",
+    )
+
+
+# ── POST /tasks/{task_id}/create-pr ────────────────────────────
+
+
+@app.post("/tasks/{task_id}/create-pr")
+async def create_pr_endpoint(
+    task_id: str, body: CreatePRRequest | None = None, token: str = Depends(_require_auth)
+) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status != TaskStatus.completed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create PR for task in status: {task.status.value}",
+        )
+
+    try:
+        result = await create_pr(task, title=body.title if body else None)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_sanitize_error(exc))  # S9
+
+
+# ── WebSocket /tasks/{task_id}/stream ──────────────────────────
+
+
+@app.websocket("/tasks/{task_id}/stream")
+async def stream_task(ws: WebSocket, task_id: str) -> None:
+    _validate_task_id(task_id)
+
+    # S10: Auth via Authorization header only (query param removed for security —
+    # tokens in URLs leak via logs, browser history, and proxy logs).
+    token: str | None = None
+    auth_header = ws.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        await ws.close(code=4001, reason="Missing bearer token")
+        return
+    try:
+        verify_token(token)
+    except HTTPException:
+        await ws.close(code=4003, reason="Invalid token")
+        return
+
+    await ws.accept()
+
+    task = await db.get_task(task_id)
+    if not task:
+        await ws.send_json({"error": "Task not found"})
+        await ws.close()
+        return
+    try:
+        _require_task_owner(task.owner_token_hash, token)
+    except HTTPException:
+        # Return same response as "not found" to prevent task ID enumeration
+        await ws.send_json({"error": "Task not found"})
+        await ws.close()
+        return
+
+    log_dir = settings.data_dir / "tasks" / task_id
+    last_size = 0
+    last_entry_count = 0  # F3: track entries sent for delta streaming
+    # Cap stream duration to task timeout + 60s buffer to prevent resource leaks
+    stream_deadline = asyncio.get_running_loop().time() + settings.task_timeout_s + 60
+
+    try:
+        while asyncio.get_running_loop().time() < stream_deadline:
+            try:
+                transcript_path = log_dir / "transcript.json"
+                if transcript_path.exists():
+                    size = transcript_path.stat().st_size
+                    if size > last_size and size <= 10_000_000:
+                        # F3: Only send new entries (delta).
+                        # Cap at 10MB to avoid blocking event loop on huge transcripts.
+                        entries = await _read_json_async(transcript_path)
+                        if isinstance(entries, list) and len(entries) > last_entry_count:
+                            new_entries = entries[last_entry_count:]
+                            await ws.send_json({"type": "transcript", "entries": new_entries})
+                            last_entry_count = len(entries)
+                        last_size = size
+                    elif size > 10_000_000 and last_size <= 10_000_000:
+                        # Transcript exceeded size cap — notify client once
+                        await ws.send_json(
+                            {
+                                "type": "warning",
+                                "message": "Transcript too large for live streaming",
+                            }
+                        )
+                        last_size = size
+            except (json.JSONDecodeError, OSError) as exc:
+                # Transient file read/parse error — log and continue polling
+                print(f"[ws] Transcript read error for {task_id}: {exc}")
+
+            current = await db.get_task(task_id)
+            if current and current.status in (
+                TaskStatus.completed,
+                TaskStatus.failed,
+                TaskStatus.cancelled,
+            ):
+                await ws.send_json(
+                    {
+                        "type": "done",
+                        "status": current.status.value,
+                        "task_id": task_id,
+                    }
+                )
+                break
+
+            await asyncio.sleep(1)
+        else:
+            # Stream deadline exceeded
+            await ws.send_json({"type": "error", "message": "Stream timed out"})
+    except Exception as exc:
+        # WebSocket disconnect or other unrecoverable error
+        try:
+            await ws.send_json({"type": "error", "message": "Stream interrupted"})
+        except Exception:
+            pass
+        print(f"[ws] Stream error for {task_id}: {type(exc).__name__}: {exc}")
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
