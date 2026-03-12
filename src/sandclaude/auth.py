@@ -8,6 +8,7 @@ SECURITY-CRITICAL: Bearer token authentication.
 """
 
 import hashlib
+import logging
 import os
 import secrets
 import stat
@@ -15,6 +16,8 @@ import stat
 from fastapi import HTTPException
 
 from sandclaude.config import settings
+
+logger = logging.getLogger(__name__)
 
 _cached_token: str | None = None
 
@@ -30,16 +33,17 @@ def init_token() -> str:
         if os.name != "nt":
             mode = token_path.stat().st_mode
             if mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH):
-                print(
-                    f"[auth] WARNING: Token file {token_path} has insecure permissions "
-                    f"(mode {oct(mode)}). Fixing to 0o600."
+                logger.warning(
+                    "Token file %s has insecure permissions (mode %s). Fixing to 0o600.",
+                    token_path,
+                    oct(mode),
                 )
                 token_path.chmod(0o600)
         loaded = token_path.read_text().strip()
         if not loaded or len(loaded) < 16:
-            print(
-                f"[auth] WARNING: Token file {token_path} is empty or too short. "
-                "Regenerating token."
+            logger.warning(
+                "Token file %s is empty or too short. Regenerating token.",
+                token_path,
             )
             loaded = secrets.token_urlsafe(32)
             token_path.write_text(loaded)

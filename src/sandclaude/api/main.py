@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os as _os
 import re
 import secrets as _secrets
@@ -37,6 +38,8 @@ from sandclaude.github import create_pr
 from sandclaude.models import CreatePRRequest, TaskCreateRequest, TaskPriority, TaskStatus
 from sandclaude.runner.container import cancel_container, recover_orphans
 from sandclaude.runner.pool import get_pool_stats, submit_task
+
+logger = logging.getLogger(__name__)
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CREATE_RATE_LIMIT_WINDOW_S = 60
@@ -78,12 +81,17 @@ async def _read_json_async(path, max_bytes: int = _MAX_ARTIFACT_BYTES) -> dict |
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup: init DB, auth, recover orphans."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is required. Set it in .env or environment.")
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     await db.init_db()
     init_token()
-    print(f"[server] Data directory: {settings.data_dir.resolve()}")
+    logger.info("Data directory: %s", settings.data_dir.resolve())
     # Block multi-worker startup — pool and rate limit state is process-local.
     # Check both WEB_CONCURRENCY env var and uvicorn --workers CLI arg.
     web_concurrency = _os.environ.get("WEB_CONCURRENCY", "1")
@@ -112,12 +120,12 @@ async def lifespan(application: FastAPI):
     try:
         await recover_orphans()
     except Exception as exc:
-        print(f"[server] Warning: orphan recovery failed: {exc}")
+        logger.warning("Orphan recovery failed: %s", exc)
     if settings.task_retention_days > 0:
         count = await db.cleanup_old_tasks(settings.task_retention_days)
         if count:
             days = settings.task_retention_days
-            print(f"[server] Cleaned up {count} tasks older than {days}d")
+            logger.info("Cleaned up %d tasks older than %dd", count, days)
     yield
 
 
@@ -532,7 +540,7 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
                         last_size = size
             except (json.JSONDecodeError, OSError) as exc:
                 # Transient file read/parse error — log and continue polling
-                print(f"[ws] Transcript read error for {task_id}: {exc}")
+                logger.warning("Transcript read error for %s: %s", task_id, exc)
 
             current = await db.get_task(task_id)
             if current and current.status in (
@@ -559,7 +567,7 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
             await ws.send_json({"type": "error", "message": "Stream interrupted"})
         except Exception:
             pass
-        print(f"[ws] Stream error for {task_id}: {type(exc).__name__}: {exc}")
+        logger.warning("Stream error for %s: %s: %s", task_id, type(exc).__name__, exc)
     finally:
         try:
             await ws.close()

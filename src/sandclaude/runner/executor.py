@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
@@ -20,6 +21,8 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from sandclaude.models import AuditLog, TranscriptEntry
+
+logger = logging.getLogger(__name__)
 
 # Try importing the Agent SDK; fall back to CLI if unavailable
 _SDK_AVAILABLE = False
@@ -190,8 +193,8 @@ async def _execute_via_sdk(
     # extraction only — but do NOT infer success from a non-empty diff alone.
     # Partial output from a terminated/failed run must not be classified as success.
     if result_message is None and last_message is not None:
-        print(
-            "[executor] No SDK result message received — "
+        logger.info(
+            "No SDK result message received — "
             "using last message for metadata only (not marking as success)"
         )
         result_message = last_message
@@ -252,7 +255,7 @@ async def _execute_via_cli(
 ) -> ExecutorResult:
     """Fallback: invoke `claude` CLI as subprocess."""
     started_at = _now()
-    print(f"[executor] SDK not available, using CLI fallback for task {task_id}")
+    logger.info("SDK not available, using CLI fallback for task %s", task_id)
 
     try:
         result = await asyncio.to_thread(
@@ -411,7 +414,7 @@ def _capture_diff(cwd: str) -> tuple[str, list[str]]:
 
     if warnings:
         for w in warnings:
-            print(f"[executor] WARNING: {w}")
+            logger.warning("%s", w)
     return diff, warnings
 
 

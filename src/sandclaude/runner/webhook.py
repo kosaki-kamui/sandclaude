@@ -12,6 +12,7 @@ Set WEBHOOK_INCLUDE_PROMPT=true to include a truncated prompt excerpt.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -20,6 +21,8 @@ import httpx
 
 from sandclaude.config import settings
 from sandclaude.models import Task
+
+logger = logging.getLogger(__name__)
 
 
 def _sanitize_error_for_webhook(error: str | None) -> str | None:
@@ -108,16 +111,17 @@ async def send_webhook(task: Task) -> None:
     env_name = settings.environment.strip().lower()
     if env_name not in {"test", "dev", "development"}:
         if not task.notify_webhook.startswith("https://"):
-            print(
-                f"[webhook] BLOCKED: {_redact_url(task.notify_webhook)} "
-                f"is not HTTPS (task {task.id})"
+            logger.warning(
+                "BLOCKED: %s is not HTTPS (task %s)",
+                _redact_url(task.notify_webhook),
+                task.id,
             )
             return
 
     try:
         events: list[str] = json.loads(task.notify_on)
     except (json.JSONDecodeError, TypeError):
-        print(f"[webhook] Invalid notify_on JSON for task {task.id}, skipping")
+        logger.warning("Invalid notify_on JSON for task %s, skipping", task.id)
         return
     if task.status.value not in events:
         return
@@ -137,18 +141,18 @@ async def send_webhook(task: Task) -> None:
 
         ip1 = _resolve_safe_webhook_ip(task.notify_webhook)
         if ip1 is None:
-            print(
-                f"[webhook] BLOCKED: {_redact_url(task.notify_webhook)} "
-                f"resolves to private/local IP or failed validation"
+            logger.warning(
+                "BLOCKED: %s resolves to private/local IP or failed validation",
+                _redact_url(task.notify_webhook),
             )
             return
         # Brief delay to catch fast-rebinding DNS
         await asyncio.sleep(0.1)
         ip2 = _resolve_safe_webhook_ip(task.notify_webhook)
         if ip2 is None:
-            print(
-                f"[webhook] BLOCKED: {_redact_url(task.notify_webhook)} "
-                f"second DNS resolution returned private/local IP (possible rebinding)"
+            logger.warning(
+                "BLOCKED: %s second DNS resolution returned private/local IP (possible rebinding)",
+                _redact_url(task.notify_webhook),
             )
             return
 
@@ -170,14 +174,15 @@ async def send_webhook(task: Task) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(task.notify_webhook, json=payload)
             if resp.is_success:
-                print(f"[webhook] Notified {_redact_url(task.notify_webhook)} for task {task.id}")
+                logger.info("Notified %s for task %s", _redact_url(task.notify_webhook), task.id)
             else:
-                print(
-                    f"[webhook] Failed to notify {_redact_url(task.notify_webhook)}: "
-                    f"{resp.status_code}"
+                logger.warning(
+                    "Failed to notify %s: %s",
+                    _redact_url(task.notify_webhook),
+                    resp.status_code,
                 )
     except Exception as exc:
-        print(f"[webhook] Error sending to {_redact_url(task.notify_webhook)}: {exc}")
+        logger.error("Error sending to %s: %s", _redact_url(task.notify_webhook), exc)
 
 
 def _build_payload(task: Task, audit: dict, diff: str) -> dict:

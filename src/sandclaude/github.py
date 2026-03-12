@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ from datetime import datetime
 
 from sandclaude.config import settings
 from sandclaude.models import Task
+
+logger = logging.getLogger(__name__)
 
 
 async def create_pr(task: Task, *, title: str | None = None) -> dict:
@@ -299,7 +302,7 @@ async def _generate_ai_commit_title(prompt: str, diff: str) -> str | None:
                 if title:
                     return title
     except Exception as exc:
-        print(f"[github] AI commit title generation failed (falling back to template): {exc}")
+        logger.info("AI commit title generation failed (falling back to template): %s", exc)
 
     return None
 
@@ -355,7 +358,7 @@ async def _generate_ai_pr_summary(prompt: str, diff: str) -> str | None:
                 if summary:
                     return summary
     except Exception as exc:
-        print(f"[github] AI PR summary generation failed (using template only): {exc}")
+        logger.info("AI PR summary generation failed (using template only): %s", exc)
 
     return None
 

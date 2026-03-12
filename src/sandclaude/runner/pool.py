@@ -14,6 +14,7 @@ Within same priority, FIFO by creation time.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Callable, Coroutine
 
 from sandclaude.config import settings
@@ -21,6 +22,8 @@ from sandclaude.db import store as db
 from sandclaude.models import Task, TaskStatus
 from sandclaude.runner.container import run_task_in_container
 from sandclaude.runner.webhook import send_webhook
+
+logger = logging.getLogger(__name__)
 
 _semaphore: asyncio.Semaphore | None = None
 
@@ -81,13 +84,13 @@ async def _run_with_semaphore(task: Task) -> None:
             fresh = await db.get_task(task.id)
             if not fresh or fresh.status not in (TaskStatus.queued, TaskStatus.setup):
                 status = fresh.status.value if fresh else "deleted"
-                print(f"[pool] Skipping task {task.id}: status is {status}")
+                logger.info("Skipping task %s: status is %s", task.id, status)
                 return
 
             try:
                 await _runner_fn(task)
             except Exception as exc:
-                print(f"[pool] Runner failed for task {task.id}: {exc}")
+                logger.error("Runner failed for task %s: %s", task.id, exc)
 
             # Send webhook notification
             completed_task = await db.get_task(task.id)
@@ -95,7 +98,7 @@ async def _run_with_semaphore(task: Task) -> None:
                 try:
                     await send_webhook(completed_task)
                 except Exception as exc:
-                    print(f"[pool] Webhook failed for task {task.id}: {exc}")
+                    logger.error("Webhook failed for task %s: %s", task.id, exc)
     finally:
         # Always clean up and drain, even if webhook fails
         _scheduled.discard(task.id)

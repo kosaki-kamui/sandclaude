@@ -1,6 +1,10 @@
 # sandclaude
 
-**Run Claude as a headless coding agent on your own infrastructure.** Submit tasks via API, get diffs back - no terminal babysitting, no code leaving your VPC.
+[![CI](https://github.com/kosaki-kamui/sandclaude/actions/workflows/ci.yml/badge.svg)](https://github.com/kosaki-kamui/sandclaude/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
+**Run Claude as a headless coding agent on your own infrastructure.** Submit tasks via API, get diffs back — no terminal babysitting, no code leaving your VPC.
 
 > **Note:** This is a community project and is not affiliated with or endorsed by Anthropic.
 
@@ -257,10 +261,11 @@ See [demo/DEMO_SCRIPT.md](demo/DEMO_SCRIPT.md) for a step-by-step presentation w
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
 
 ## Community
 
+- [Changelog](CHANGELOG.md)
 - [Contributing Guide](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security Policy](SECURITY.md)

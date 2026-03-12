@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shlex
@@ -31,6 +32,8 @@ import docker
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import Task, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 _client: docker.DockerClient | None = None
 
@@ -93,7 +96,7 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
             ipv4s.append(ip_str)
 
     if not ipv4s:
-        print(f"[runner] WARNING: No IPv4 addresses resolved for {domain}")
+        logger.warning("No IPv4 addresses resolved for %s", domain)
     return ipv4s
 
 
@@ -293,7 +296,7 @@ async def run_task_in_container(task: Task) -> dict:
                 try:
                     logs = await asyncio.to_thread(container.logs, tail=50, timestamps=False)
                     log_text = logs.decode("utf-8", errors="replace").strip()
-                    print(f"[runner] Container logs:\n{log_text}")
+                    logger.debug("Container logs:\n%s", log_text)
                 except Exception:
                     log_text = ""
                 raise RuntimeError(
@@ -316,7 +319,7 @@ async def run_task_in_container(task: Task) -> dict:
                 raise RuntimeError(
                     "SKIP_NETWORK_ISOLATION=true is only allowed in development/test environments"
                 )
-            print("[runner] SKIP_NETWORK_ISOLATION=true, skipping network switch")
+            logger.info("SKIP_NETWORK_ISOLATION=true, skipping network switch")
 
         # Signal container to proceed to agent phase
         (output_dir / ".network-switched").write_text("")
@@ -570,4 +573,4 @@ async def recover_orphans() -> None:
             completed_at=datetime.now(timezone.utc).isoformat(),
             error="server_restart_orphaned",
         )
-        print(f"[runner] Marked orphaned task {task.id} as failed")
+        logger.info("Marked orphaned task %s as failed", task.id)

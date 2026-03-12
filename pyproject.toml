@@ -9,6 +9,7 @@ description = "Self-hosted async execution engine for Claude Code"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [{name = "sandclaude contributors"}]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
