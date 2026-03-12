@@ -245,7 +245,7 @@ Every task produces a structured audit log:
 | `DOCKER_HOST` | `tcp://socket-proxy:2375` (Compose) | Docker API endpoint used by server |
 | `ENVIRONMENT` | `production` | Runtime environment (`production`, `development`, `test`) |
 | `SKIP_NETWORK_ISOLATION` | `false` | Skip iptables rules (allowed only in `development`/`test`) |
-| `GIT_TOKEN` | (none) | Token for cloning private repos + creating PRs via `gh` CLI (GitHub PAT, GitLab token). Passed as `GH_TOKEN` for PR creation. Scrubbed before agent phase. |
+| `GIT_TOKEN` | (none) | Token for cloning private repos (any HTTPS git host) + creating PRs (GitHub only, via `gh` CLI). Passed as `GH_TOKEN` for PR creation. Scrubbed before agent phase. |
 | `ALLOWED_REPO_BASE` | (none) | Comma-separated allowed base dirs for local repo mounts (required in production if not using `HOST_CWD`) |
 | `WEBHOOK_INCLUDE_PROMPT` | `false` | Include task prompt excerpt in webhook payloads (off by default for privacy) |
 

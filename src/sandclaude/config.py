@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     allowed_domains: str = ""  # comma-separated domains allowed in agent phase
     task_retention_days: int = 30  # auto-delete completed tasks older than this (0 = keep forever)
     skip_network_isolation: bool = False  # only allowed in development/test environments
-    git_token: str = ""  # optional, for cloning private repos + PR creation (GitHub PAT or similar)
+    git_token: str = ""  # cloning: any HTTPS git host; PR creation: GitHub only (via gh CLI)
     auth_tokens: str = ""  # optional extra bearer tokens (comma-separated)
     allowed_repo_base: str = ""  # comma-separated allowed base dirs for local repo mounts
     webhook_include_prompt: bool = False  # include prompt in webhooks

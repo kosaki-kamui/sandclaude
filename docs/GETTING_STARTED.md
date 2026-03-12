@@ -301,7 +301,7 @@ Use natural language in your Claude Code session:
 
 ## Tips
 
-- **Private repos:** Set `GIT_TOKEN` in `.env` on the server. Use a GitHub fine-grained PAT with Contents read/write + Pull requests read/write.
+- **Private repos:** Set `GIT_TOKEN` in `.env` on the server. For cloning, any HTTPS git host works (GitHub, GitLab, Bitbucket). For PR creation, only GitHub is supported (via `gh` CLI). Use a GitHub fine-grained PAT with Contents read/write + Pull requests read/write.
 - **Dependencies:** Set `ALLOWED_DOMAINS=registry.npmjs.org,pypi.org,files.pythonhosted.org` so Claude can install npm/pip packages during execution.
 - **Cost control:** Use `max_turns: 10` for simple tasks, `max_turns: 50` for complex ones. Each turn costs roughly $0.01-0.05 depending on the model.
 - **Concurrent tasks:** Submit up to 3 tasks at once (configurable via `MAX_CONCURRENT`). Additional tasks are queued automatically.
