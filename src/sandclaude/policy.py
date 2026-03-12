@@ -1,5 +1,14 @@
 """
 v0.2.0: Policy engine — preset resolution, merge logic, approval gate creation.
+
+SECURITY-CRITICAL: The merge semantics are restrictive by design.
+Task-level overrides can only narrow access, never widen it.
+- Allowlists (commands, domains, paths, secrets): intersection
+- Deny lists (blocked_branches, requires_approval_for): union
+- Numerics (max_turns, max_cost_usd, timeout_s): minimum wins
+- Restriction booleans (pr_only): most restrictive wins (True > False)
+- Permissive booleans (allow_pr_creation): most restrictive wins (False > True)
+- Strings (model): task override wins (non-security-relevant)
 """
 
 from __future__ import annotations
@@ -13,28 +22,106 @@ from sandclaude.models import PolicyPresetConfig, Task
 
 logger = logging.getLogger(__name__)
 
+# Fields where task overrides intersect with preset (can only narrow)
+_ALLOWLIST_FIELDS = frozenset(
+    {
+        "allowed_commands",
+        "allowed_write_paths",
+        "allowed_domains",
+        "allowed_secrets",
+        "allowed_repos",
+    }
+)
+
+# Fields where task overrides union with preset (can only add restrictions)
+_DENYLIST_FIELDS = frozenset(
+    {
+        "blocked_branches",
+        "requires_approval_for",
+    }
+)
+
+# Numeric fields where the minimum (most restrictive) wins
+_NUMERIC_CEILING_FIELDS = frozenset(
+    {
+        "max_turns",
+        "max_cost_usd",
+        "timeout_s",
+    }
+)
+
+# Boolean fields where True is more restrictive
+_RESTRICTIVE_BOOL_FIELDS = frozenset(
+    {
+        "pr_only",
+    }
+)
+
+# Boolean fields where False is more restrictive
+_PERMISSIVE_BOOL_FIELDS = frozenset(
+    {
+        "allow_pr_creation",
+    }
+)
+
 
 def merge_policy(preset: dict[str, Any], task_overrides: dict[str, Any]) -> dict[str, Any]:
-    """Merge a preset config with per-task overrides.
+    """Merge a preset config with per-task overrides using restrictive semantics.
 
-    Rules:
-    - Lists (allowed_commands, allowed_domains, etc.): union
-    - Numerics (max_turns, max_cost_usd, timeout_s): task can lower but not exceed preset ceiling
-    - Booleans/strings: task override wins if explicitly set
+    Task overrides can only narrow access, never widen it:
+    - Allowlists: intersection (task can remove items, not add)
+    - Deny lists: union (task can add restrictions, not remove)
+    - Numerics: minimum wins (task can lower ceiling, not raise)
+    - Restriction bools: most restrictive wins
+    - Strings: task override wins (non-security fields like model)
     """
     merged = {**preset}
     for key, value in task_overrides.items():
         if value is None:
             continue
         preset_value = merged.get(key)
-        if isinstance(preset_value, list) and isinstance(value, list):
-            # Union for list fields
-            merged[key] = list(set(preset_value) | set(value))
-        elif isinstance(preset_value, (int, float)) and isinstance(value, (int, float)):
-            # Task can lower but not exceed preset ceiling
-            merged[key] = min(value, preset_value)
+
+        if key in _ALLOWLIST_FIELDS:
+            if isinstance(preset_value, list) and isinstance(value, list):
+                # Intersection: task can only narrow, not widen
+                merged[key] = list(set(preset_value) & set(value))
+            elif preset_value is None:
+                # No preset restriction — task value becomes the restriction
+                merged[key] = value
+            # If preset has a list but task doesn't provide one, preset wins
+
+        elif key in _DENYLIST_FIELDS:
+            if isinstance(preset_value, list) and isinstance(value, list):
+                # Union: task can add deny entries, not remove
+                merged[key] = list(set(preset_value) | set(value))
+            elif preset_value is None:
+                merged[key] = value
+
+        elif key in _NUMERIC_CEILING_FIELDS:
+            if isinstance(preset_value, (int, float)) and isinstance(value, (int, float)):
+                # Minimum: task can lower ceiling, not raise
+                merged[key] = min(value, preset_value)
+            elif preset_value is None:
+                merged[key] = value
+
+        elif key in _RESTRICTIVE_BOOL_FIELDS:
+            if isinstance(preset_value, bool) and isinstance(value, bool):
+                # True is more restrictive — OR
+                merged[key] = preset_value or value
+            elif preset_value is None:
+                merged[key] = value
+
+        elif key in _PERMISSIVE_BOOL_FIELDS:
+            if isinstance(preset_value, bool) and isinstance(value, bool):
+                # False is more restrictive — AND
+                merged[key] = preset_value and value
+            elif preset_value is None:
+                merged[key] = value
+
         else:
+            # Non-security fields (model, etc.): task override wins
             merged[key] = value
+
     return merged
 
 
@@ -50,7 +137,11 @@ async def resolve_effective_policy(task: Task) -> PolicyPresetConfig:
         if preset:
             base_config = preset.config
         else:
-            logger.warning("Task %s references unknown preset '%s'", task.id, task.policy_preset)
+            logger.warning(
+                "Task %s references unknown preset '%s'",
+                task.id,
+                task.policy_preset,
+            )
 
     # Build task-level overrides from task fields
     task_overrides: dict[str, Any] = {}

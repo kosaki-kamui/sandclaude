@@ -120,6 +120,10 @@
         {% if has_pending %}
         <div class="card">
             <h2>Decision</h2>
+            <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                Enter your API token to authorize this action. The approval link only grants view access — approval requires a token with <code>tasks:approve</code> scope.
+            </p>
+            <input type="password" class="reason-input" id="apiToken" placeholder="API token (required)" autocomplete="off">
             <input type="text" class="reason-input" id="reason" placeholder="Reason (optional)">
             <div class="actions">
                 <button class="btn btn-approve" id="approveBtn" onclick="decide('approve')">Approve</button>
@@ -134,6 +138,11 @@
 
     <script>
         async function decide(decision) {
+            const apiToken = document.getElementById('apiToken').value;
+            if (!apiToken) {
+                document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
+                return;
+            }
             const reason = document.getElementById('reason').value;
             const approveBtn = document.getElementById('approveBtn');
             const rejectBtn = document.getElementById('rejectBtn');
@@ -145,7 +154,7 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': 'Bearer {{ approval_token }}'
+                        'Authorization': 'Bearer ' + apiToken
                     },
                     body: JSON.stringify({ reason: reason || null })
                 });

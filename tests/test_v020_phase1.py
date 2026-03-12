@@ -371,11 +371,26 @@ class TestPolicyPresets:
 
 
 class TestPolicyMerge:
-    def test_lists_are_unioned(self):
+    def test_allowlists_use_intersection(self):
+        """Task overrides can only narrow allowlists, not widen them."""
+        preset = {"allowed_commands": ["npm", "pip", "cargo"]}
+        overrides = {"allowed_commands": ["pip", "cargo"]}
+        merged = merge_policy(preset, overrides)
+        assert set(merged["allowed_commands"]) == {"pip", "cargo"}
+
+    def test_allowlist_task_cannot_add_items(self):
+        """A task requesting a command not in the preset gets nothing extra."""
         preset = {"allowed_commands": ["npm", "pip"]}
         overrides = {"allowed_commands": ["cargo"]}
         merged = merge_policy(preset, overrides)
-        assert set(merged["allowed_commands"]) == {"npm", "pip", "cargo"}
+        assert merged["allowed_commands"] == []
+
+    def test_denylists_use_union(self):
+        """Task can add deny entries but not remove preset denies."""
+        preset = {"requires_approval_for": ["create_pr"]}
+        overrides = {"requires_approval_for": ["push"]}
+        merged = merge_policy(preset, overrides)
+        assert set(merged["requires_approval_for"]) == {"create_pr", "push"}
 
     def test_numerics_capped_by_preset(self):
         preset = {"max_cost_usd": 1.0}

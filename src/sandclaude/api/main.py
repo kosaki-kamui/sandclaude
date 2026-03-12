@@ -539,6 +539,10 @@ async def approve_action_endpoint(
     body: ApprovalDecisionRequest | None = None,
     token: str = Depends(_require_auth),
 ) -> dict:
+    # Scope check: approval requires explicit tasks:approve permission
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "tasks:approve")
+
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -549,7 +553,7 @@ async def approve_action_endpoint(
         task_id,
         action,
         decision=ApprovalStatus.approved,
-        decided_by=token_fingerprint(token),
+        decided_by=auth.fingerprint,
         reason=body.reason if body else None,
     )
     if not ok:
@@ -569,6 +573,10 @@ async def reject_action_endpoint(
     body: ApprovalDecisionRequest | None = None,
     token: str = Depends(_require_auth),
 ) -> dict:
+    # Scope check: rejection also requires explicit tasks:approve permission
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "tasks:approve")
+
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -579,13 +587,40 @@ async def reject_action_endpoint(
         task_id,
         action,
         decision=ApprovalStatus.rejected,
-        decided_by=token_fingerprint(token),
+        decided_by=auth.fingerprint,
         reason=body.reason if body else None,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="No pending approval gate found")
 
     return {"status": "rejected", "task_id": task_id, "action": action}
+
+
+@app.post("/tasks/{task_id}/approval-link/{action}")
+async def generate_approval_link_endpoint(
+    task_id: str,
+    action: str,
+    token: str = Depends(_require_auth),
+) -> dict:
+    """Generate a signed, short-lived approval link for a task action.
+
+    The link can be shared in Slack notifications or webhooks.
+    It grants read-only access to the approval page — the user must
+    enter their own API token to actually approve or reject.
+    """
+    from sandclaude.auth import create_approval_link_token
+
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    link_token = create_approval_link_token(task_id, action)
+    base_url = settings.api_url.rstrip("/")
+    url = f"{base_url}/approve/{task_id}/{action}?token={link_token}"
+
+    return {"approval_url": url, "expires_in_seconds": 3600}
 
 
 # ── v0.2.0: Approval UI (server-rendered) ────────────────────
@@ -595,18 +630,19 @@ async def reject_action_endpoint(
 async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLResponse:
     """Server-rendered approval page. Linked from Slack/webhook notifications.
 
-    The token is passed as a query parameter for one-click access from
-    notification links. This is acceptable because:
-    - The URL is sent to the task owner via a private channel (Slack DM, webhook)
-    - The page only shows task metadata and diff (same as GET /tasks/{id})
-    - Actual approve/reject actions use the token via API call from the page JS
+    Uses a signed, short-lived approval token (NOT a raw API token).
+    The approval link token:
+    - Is HMAC-signed with the server's primary key
+    - Expires after 1 hour
+    - Is scoped to a specific task_id + action pair
+    - Cannot be used for general API access
     """
+    from sandclaude.auth import verify_approval_link_token
+
     if not token:
-        return HTMLResponse("<h1>401 — Missing token</h1>", status_code=401)
-    try:
-        verify_token(token)
-    except HTTPException:
-        return HTMLResponse("<h1>401 — Invalid token</h1>", status_code=401)
+        return HTMLResponse("<h1>401 — Missing or expired approval link</h1>", status_code=401)
+    if not verify_approval_link_token(token, task_id, action):
+        return HTMLResponse("<h1>401 — Invalid or expired approval link</h1>", status_code=401)
 
     task = await db.get_task(task_id)
     if not task:
@@ -674,7 +710,6 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
         diff_preview=diff_preview,
         gates=[{"status": g.status.value, "action": g.action, "reason": g.reason} for g in gates],
         has_pending=has_pending,
-        approval_token=token,
     )
     return HTMLResponse(html)
 

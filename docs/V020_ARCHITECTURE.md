@@ -22,10 +22,22 @@ queued → setup → running → pending_approval → completed | failed | cance
 
 ### Design
 
-- New status: `pending_approval` — task execution is done, diff is produced, but PR creation or other gated actions are blocked until approved.
-- New status: `rejected` is NOT a separate enum value. Rejection sets `status=failed, error="approval_rejected"`. This keeps terminal states simple (completed/failed/cancelled) and avoids downstream changes to webhook triggers, retention cleanup, and pool drain logic.
-- Approval gates are checked **after** task execution completes, **before** gated actions (PR creation, push) are performed. The task has already produced its diff and audit log — approval decides whether the *action* proceeds, not whether the *execution* runs.
-- Implication: The existing `POST /tasks/{task_id}/create-pr` endpoint becomes approval-aware. If the task's policy requires approval for PR creation, the endpoint returns 409 until the task is approved.
+- `pending_approval` is a **first-class task status** in the `TaskStatus` enum. A task transitions to `pending_approval` when execution completes and the policy requires approval for at least one action. The task's diff, audit log, and cost data are all available at this point.
+- `rejected` is NOT a separate status. Rejection is handled per-gate: the gate status becomes `rejected`, and the gated action (e.g., PR creation) returns 403. The task itself remains in `completed` or `pending_approval` — it is not marked as failed unless all gates are rejected.
+- Approval gates are checked **after** task execution completes, **before** gated actions (PR creation, push) are performed. The `POST /tasks/{id}/create-pr` endpoint returns 409 if a `create_pr` gate is pending, 403 if rejected.
+- The `requires_approval` flag on the task tracks whether any gates are still pending. It is set to 1 when gates are created and cleared to 0 when all gates are resolved.
+
+### Lifecycle with approval
+
+```
+queued → setup → running → completed (if no gates required)
+                         → pending_approval (if gates required)
+                              → completed (after all gates approved)
+
+pending_approval is a terminal-ish state: execution is done,
+the task is waiting for human decision on gated actions.
+WebSocket streams report it as "done" so clients stop polling.
+```
 
 ### Alternative considered
 
@@ -33,13 +45,6 @@ Gate execution itself (task sits in `pending_approval` before running). Rejected
 - The diff doesn't exist yet, so there's nothing for the approver to review
 - It would block a semaphore slot while waiting for human approval
 - The value of sandclaude is unattended execution; gating execution defeats the purpose
-
-### Schema change
-
-```sql
--- No new status enum needed (pending_approval is a task-level flag, not a lifecycle state)
--- See Section 2 for the approvals table
-```
 
 ### Why this approach
 
@@ -121,44 +126,37 @@ ALTER TABLE tasks ADD COLUMN cost_budget_usd REAL;        -- max allowed cost (N
 
 If a preset says `allowed_commands: ["npm", "pip"]` and the task request says `allowed_commands: ["cargo"]`, what wins?
 
-### Decision: per-task values extend, not override
+### Decision: restrictive composition — task overrides can only narrow, never widen
 
 ```
-effective = preset_defaults ∪ task_overrides
+effective = preset ∩ task_overrides  (for allowlists)
+effective = preset ∪ task_overrides  (for deny lists)
+effective = min(preset, task)        (for numerics)
 ```
 
 Specifically:
 
 | Field type | Merge rule | Example |
 |-----------|-----------|---------|
-| List (allowed_commands, allowed_domains, allowed_paths) | Union | preset `["npm"]` + task `["cargo"]` = `["npm", "cargo"]` |
-| Boolean (requires_approval, allow_pr_creation) | Task override wins if explicitly set | preset `true` + task `false` = `false` |
-| Numeric (timeout, max_turns, cost_budget) | Task override wins if explicitly set, but capped by preset max | preset `max_cost=1.0` + task `max_cost=5.0` = `1.0` (preset caps) |
-| String (model) | Task override wins if explicitly set | preset `claude-sonnet-4-5` + task `claude-opus-4-6` = `claude-opus-4-6` |
+| Allowlists (allowed_commands, allowed_domains, allowed_paths, allowed_secrets, allowed_repos) | Intersection | preset `["npm", "pip"]` + task `["pip", "cargo"]` = `["pip"]` |
+| Deny lists (blocked_branches, requires_approval_for) | Union | preset `["main"]` + task `["staging"]` = `["main", "staging"]` |
+| Numerics (max_turns, max_cost_usd, timeout_s) | Minimum (most restrictive) | preset `max_cost=5.0` + task `max_cost=1.0` = `1.0` |
+| Restriction booleans (pr_only) | Most restrictive wins (True > False) | preset `false` + task `true` = `true` |
+| Permissive booleans (allow_pr_creation) | Most restrictive wins (False > True) | preset `true` + task `false` = `false` |
+| Strings (model) | Task override wins | preset `claude-sonnet-4-5` + task `claude-opus-4-6` = `claude-opus-4-6` |
 
 ### Rationale
 
-- Lists use union because restricting is done at the preset level (if a preset doesn't include `cargo`, the admin creates a different preset). Extending is the common case (task needs an extra domain).
-- Booleans let tasks opt out of preset defaults (e.g., skip approval for a low-risk task under a strict preset). Admins who want to enforce approval can use a "locked" flag on the preset (future: v0.3.0).
-- Numerics are capped by preset to prevent cost/timeout escalation. The preset sets the ceiling; the task can only go lower.
+- **Allowlists use intersection** because a task should not be able to grant itself access beyond what the preset allows. If the preset says `["npm", "pip"]` and the task asks for `["cargo"]`, the result is `[]` — the task gets nothing outside the preset. This is the only safe default for a security boundary.
+- **Deny lists use union** because a task should be able to add restrictions but not remove them. If the preset blocks `main` and the task also blocks `staging`, both are blocked.
+- **Numerics use minimum** because a task should be able to lower its own budget but not exceed the preset ceiling.
+- **Restriction booleans use OR** (True wins) because if either the preset or the task wants the restriction, it applies.
+- **Permissive booleans use AND** (False wins) because both must agree to allow the action.
+- **Strings override** because non-security fields like model selection are the task's choice.
 
 ### Implementation
 
-```python
-def merge_policy(preset: dict, task_overrides: dict) -> dict:
-    merged = {**preset}
-    for key, value in task_overrides.items():
-        if value is None:
-            continue
-        if isinstance(merged.get(key), list) and isinstance(value, list):
-            merged[key] = list(set(merged[key]) | set(value))
-        elif isinstance(merged.get(key), (int, float)) and isinstance(value, (int, float)):
-            # Task can lower but not exceed preset ceiling
-            merged[key] = min(value, merged[key])
-        else:
-            merged[key] = value
-    return merged
-```
+See `policy.py:merge_policy()` — classifies each field by type (allowlist, denylist, numeric ceiling, restriction bool, permissive bool, or string) and applies the corresponding merge rule. Field classification is defined in module-level frozensets for auditability.
 
 ---
 

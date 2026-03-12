@@ -185,6 +185,66 @@ def generate_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+# ---------------------------------------------------------------------------
+# v0.2.0: Signed approval links (short-lived, single-purpose)
+# ---------------------------------------------------------------------------
+
+_APPROVAL_LINK_TTL_S = 3600  # 1 hour
+
+
+def create_approval_link_token(
+    task_id: str, action: str, *, ttl_s: int = _APPROVAL_LINK_TTL_S
+) -> str:
+    """Create a signed, time-limited token for an approval link.
+
+    The token encodes: task_id, action, expiry. It is signed with HMAC
+    using the server's primary token as the key. This token does NOT
+    grant general API access — it can only be used to render the
+    approval page and make approve/reject calls for this specific
+    task+action pair.
+    """
+    import hmac
+    import time
+
+    expiry = int(time.time()) + ttl_s
+    payload = f"{task_id}:{action}:{expiry}"
+    key = get_token().encode()
+    sig = hmac.new(key, payload.encode(), "sha256").hexdigest()[:32]
+    return f"{payload}:{sig}"
+
+
+def verify_approval_link_token(token: str, expected_task_id: str, expected_action: str) -> bool:
+    """Verify a signed approval link token.
+
+    Returns True if the token is valid, not expired, and matches the
+    expected task_id and action.
+    """
+    import hmac
+    import time
+
+    parts = token.split(":")
+    if len(parts) != 4:
+        return False
+
+    task_id, action, expiry_str, sig = parts
+    if task_id != expected_task_id or action != expected_action:
+        return False
+
+    try:
+        expiry = int(expiry_str)
+    except ValueError:
+        return False
+
+    if time.time() > expiry:
+        return False
+
+    payload = f"{task_id}:{action}:{expiry_str}"
+    key = get_token().encode()
+    expected_sig = hmac.new(key, payload.encode(), "sha256").hexdigest()[:32]
+
+    return hmac.compare_digest(sig, expected_sig)
+
+
 def get_token() -> str:
     """Return the current token. Raises if not initialized."""
     if _cached_token is None:
