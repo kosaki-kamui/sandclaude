@@ -1,0 +1,68 @@
+# sandclaude: Fix failing CI by opening a patch PR
+#
+# When CI fails on a push to main, this workflow submits the failure context
+# to sandclaude, which generates a fix and opens a PR automatically.
+#
+# Prerequisites:
+# - A running sandclaude server accessible from GitHub Actions
+# - Repository secrets: SANDCLAUDE_URL, SANDCLAUDE_TOKEN, GIT_TOKEN
+#
+# Usage: Copy this file to your repo's .github/workflows/ directory.
+
+name: "sandclaude: Fix CI"
+
+on:
+  workflow_run:
+    workflows: ["CI"]  # Name of your CI workflow
+    types: [completed]
+    branches: [main]
+
+jobs:
+  fix-ci:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit fix task to sandclaude
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK=$(curl -s -X POST "$SANDCLAUDE_URL/tasks" \
+            -H "Authorization: Bearer $SANDCLAUDE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"${{ github.repository }}\",
+              \"prompt\": \"CI failed on the main branch. Analyze the test failures and fix the code. Run the tests to verify your fix passes.\",
+              \"max_turns\": 20,
+              \"policy_preset\": \"bugfix-pr\"
+            }")
+          echo "$TASK" | jq .
+          TASK_ID=$(echo "$TASK" | jq -r .id)
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
+        id: submit
+
+      - name: Wait for task completion
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK_ID="${{ steps.submit.outputs.task_id }}"
+          for i in $(seq 1 60); do
+            STATUS=$(curl -s "$SANDCLAUDE_URL/tasks/$TASK_ID" \
+              -H "Authorization: Bearer $SANDCLAUDE_TOKEN" | jq -r .status)
+            echo "Attempt $i: status=$STATUS"
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Create PR from completed task
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK_ID="${{ steps.submit.outputs.task_id }}"
+          curl -s -X POST "$SANDCLAUDE_URL/tasks/$TASK_ID/create-pr" \
+            -H "Authorization: Bearer $SANDCLAUDE_TOKEN" \
+            -H "Content-Type: application/json" | jq .

@@ -50,7 +50,23 @@ async def create_pr(task: Task, *, title: str | None = None) -> dict:
     # Generate AI summary for the PR body
     ai_summary = await _generate_ai_pr_summary(task.prompt, diff)
 
-    pr_body = _build_pr_body(task, audit, diff, ai_summary=ai_summary)
+    # v0.2.0: Generate risk summary
+    from sandclaude.risk import (
+        format_risk_summary_markdown,
+        generate_risk_summary,
+    )
+
+    risk = generate_risk_summary(
+        diff, audit,
+        tokens_input=task.tokens_input or 0,
+        tokens_output=task.tokens_output or 0,
+        cost_usd=task.total_cost_usd or 0.0,
+    )
+    risk_md = format_risk_summary_markdown(risk)
+
+    pr_body = _build_pr_body(
+        task, audit, diff, ai_summary=ai_summary, risk_summary=risk_md,
+    )
 
     # Resolve repo working directory
     cwd, tmp_dir = await _resolve_repo_dir(task)
@@ -442,7 +458,11 @@ def _build_commit_message(task: Task, audit: dict, diff: str, pr_title: str) -> 
     return "\n".join(lines)
 
 
-def _build_pr_body(task: Task, audit: dict, diff: str, *, ai_summary: str | None = None) -> str:
+def _build_pr_body(
+    task: Task, audit: dict, diff: str, *,
+    ai_summary: str | None = None,
+    risk_summary: str | None = None,
+) -> str:
     files_changed = _extract_changed_files(diff)
     duration = _calc_duration_str(task)
 
@@ -478,6 +498,10 @@ def _build_pr_body(task: Task, audit: dict, diff: str, *, ai_summary: str | None
 
     for f in files_changed:
         parts.append(f"- `{f}`")
+
+    # v0.2.0: Risk summary
+    if risk_summary:
+        parts.extend(["", risk_summary])
 
     parts.extend(["", "## Audit Trail", ""])
 

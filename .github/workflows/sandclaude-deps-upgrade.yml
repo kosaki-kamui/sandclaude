@@ -1,0 +1,73 @@
+# sandclaude: Scheduled dependency upgrade
+#
+# Runs weekly to check for and apply dependency upgrades, then opens a PR.
+#
+# Prerequisites:
+# - A running sandclaude server accessible from GitHub Actions
+# - Repository secrets: SANDCLAUDE_URL, SANDCLAUDE_TOKEN
+#
+# Usage: Copy this file to your repo's .github/workflows/ directory.
+
+name: "sandclaude: Deps Upgrade"
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Every Monday at 9am UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit upgrade task
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK=$(curl -s -X POST "$SANDCLAUDE_URL/tasks" \
+            -H "Authorization: Bearer $SANDCLAUDE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"https://github.com/${{ github.repository }}.git\",
+              \"prompt\": \"Check for outdated dependencies and upgrade them. Run tests after upgrading to verify nothing breaks. Only upgrade minor and patch versions unless there are known security fixes in major versions.\",
+              \"max_turns\": 25,
+              \"policy_preset\": \"deps-upgrade\",
+              \"allowed_domains\": [\"registry.npmjs.org\", \"pypi.org\", \"files.pythonhosted.org\"]
+            }")
+          echo "$TASK" | jq .
+          TASK_ID=$(echo "$TASK" | jq -r .id)
+          echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
+        id: submit
+
+      - name: Wait for completion
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK_ID="${{ steps.submit.outputs.task_id }}"
+          for i in $(seq 1 60); do
+            STATUS=$(curl -s "$SANDCLAUDE_URL/tasks/$TASK_ID" \
+              -H "Authorization: Bearer $SANDCLAUDE_TOKEN" | jq -r .status)
+            echo "Attempt $i: status=$STATUS"
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Create PR if changes were made
+        env:
+          SANDCLAUDE_URL: ${{ secrets.SANDCLAUDE_URL }}
+          SANDCLAUDE_TOKEN: ${{ secrets.SANDCLAUDE_TOKEN }}
+        run: |
+          TASK_ID="${{ steps.submit.outputs.task_id }}"
+          DIFF=$(curl -s "$SANDCLAUDE_URL/tasks/$TASK_ID/diff" \
+            -H "Authorization: Bearer $SANDCLAUDE_TOKEN")
+          if [ -n "$DIFF" ] && [ "$DIFF" != "null" ]; then
+            curl -s -X POST "$SANDCLAUDE_URL/tasks/$TASK_ID/create-pr" \
+              -H "Authorization: Bearer $SANDCLAUDE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"title": "chore: upgrade dependencies"}' | jq .
+          else
+            echo "No changes — dependencies are up to date"
+          fi
