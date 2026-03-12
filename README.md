@@ -48,6 +48,12 @@ sandclaude is the bridge between "Claude can code" and "Claude can code *for my 
 - **Claude Code MCP plugin** - use sandclaude from inside Claude Code with natural language
 - **Automatic cleanup** - old tasks auto-deleted after configurable retention period
 - **Orphan recovery** - crashed containers detected and cleaned up on server restart
+- **Approval gates** - policy-driven gates on PR creation and other high-risk actions, with `tasks:approve` scope enforcement
+- **Policy presets** - built-in presets (`bugfix-pr`, `docs-only`, `tests-only`, `deps-upgrade`, `review-only`) with restrictive merge semantics
+- **Scoped tokens** - named tokens with scopes, expiry, and revocation for team deployments
+- **PR risk summary** - automated risk assessment with file categorization, sensitive file detection, and risk level
+- **AI code review** - `POST /tasks/{id}/review` for structured review of completed diffs
+- **Secrets management** - tasks declare needed secrets, server injects per policy, audit records names (never values)
 
 ## Two-Phase Sandbox Architecture
 
@@ -154,16 +160,33 @@ All endpoints require `Authorization: Bearer <token>` (except `/health`). WebSoc
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/tasks` | Submit a task `{repo, prompt, model?, branch?, max_turns?, allowed_domains?}` |
+| `POST` | `/tasks` | Submit a task `{repo, prompt, model?, branch?, policy_preset?, declared_secrets?, cost_budget_usd?}` |
 | `GET` | `/tasks` | List tasks visible to your auth token |
 | `GET` | `/tasks/{task_id}` | Get task details, diff, audit log |
 | `GET` | `/tasks/{task_id}/diff` | Get raw diff |
 | `GET` | `/tasks/{task_id}/audit` | Get audit log JSON |
 | `GET` | `/tasks/{task_id}/result` | Get result summary JSON |
 | `GET` | `/tasks/{task_id}/transcript` | Get transcript JSON |
-| `DELETE` | `/tasks/{task_id}` | Delete a terminal task (`completed`/`failed`/`cancelled`) and its output files |
+| `GET` | `/tasks/{task_id}/risk` | Get structured risk assessment |
+| `POST` | `/tasks/{task_id}/review` | AI code review of completed diff |
+| `GET` | `/tasks/{task_id}/secrets` | Get secrets audit (names + granted/denied) |
+| `POST` | `/tasks/{task_id}/retry` | Create a follow-up task |
+| `GET` | `/tasks/{task_id}/bundle` | Export reproducible task bundle |
+| `DELETE` | `/tasks/{task_id}` | Delete a terminal task and its output files |
 | `POST` | `/tasks/{task_id}/cancel` | Cancel a running task |
-| `POST` | `/tasks/{task_id}/create-pr` | Create a GitHub PR from completed task |
+| `POST` | `/tasks/{task_id}/create-pr` | Create a GitHub PR (approval-gated) |
+| `GET` | `/tasks/{task_id}/approvals` | List approval gates |
+| `POST` | `/tasks/{task_id}/approve/{action}` | Approve a gate (requires `tasks:approve`) |
+| `POST` | `/tasks/{task_id}/reject/{action}` | Reject a gate (requires `tasks:approve`) |
+| `POST` | `/tasks/{task_id}/approval-link/{action}` | Generate signed approval link |
+| `GET` | `/approve/{task_id}/{action}` | Server-rendered approval page |
+| `POST` | `/tokens` | Create a scoped token (requires `admin:tokens`) |
+| `GET` | `/tokens` | List tokens (requires `admin:tokens`) |
+| `POST` | `/tokens/{token_id}/revoke` | Revoke a token (requires `admin:tokens`) |
+| `PUT` | `/policies/{name}` | Create/update policy preset (requires `admin:policies`) |
+| `GET` | `/policies` | List policy presets (requires `admin:policies`) |
+| `GET` | `/policies/{name}` | Get policy preset (requires `admin:policies`) |
+| `DELETE` | `/policies/{name}` | Delete policy preset (requires `admin:policies`) |
 | `WS` | `/tasks/{task_id}/stream` | Real-time task log streaming (Bearer auth) |
 | `GET` | `/pool` | Runner pool stats (active, queued, max) |
 | `GET` | `/health` | Health check (no auth) |
@@ -248,6 +271,7 @@ Every task produces a structured audit log:
 | `GIT_TOKEN` | (none) | Token for cloning private repos (any HTTPS git host) + creating PRs (GitHub only, via `gh` CLI). Passed as `GH_TOKEN` for PR creation. Scrubbed before agent phase. |
 | `ALLOWED_REPO_BASE` | (none) | Comma-separated allowed base dirs for local repo mounts (required in production if not using `HOST_CWD`) |
 | `WEBHOOK_INCLUDE_PROMPT` | `false` | Include task prompt excerpt in webhook payloads (off by default for privacy) |
+| `SECRET_*` | (none) | Injectable secrets for tasks (e.g., `SECRET_NPM_TOKEN=npm_abc123`). Tasks declare what they need; server resolves from these env vars per policy. |
 
 ## Demo
 

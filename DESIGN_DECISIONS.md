@@ -167,3 +167,43 @@
 - **pip compatibility:** uv generates standard wheels and supports `pip install .` as a fallback, so users who prefer pip are not excluded.
 
 **Trade-off:** uv is newer and less battle-tested than pip/poetry. However, it's backed by Astral (the ruff team) and is rapidly becoming the standard in the Python ecosystem.
+
+---
+
+## v0.2.0 Decisions
+
+See [docs/V020_ARCHITECTURE.md](docs/V020_ARCHITECTURE.md) for the full v0.2.0 architecture document. Key decisions summarized here:
+
+## 15. Approval Gates Run After Execution, Not Before
+
+**Decision:** Tasks always run to completion. Approval gates control what happens *with the output* (e.g., PR creation), not whether the execution runs.
+
+**Reasoning:**
+- The diff doesn't exist before execution, so there's nothing for an approver to review.
+- Gating execution would block a semaphore slot while waiting for human approval.
+- sandclaude's value is unattended execution; gating execution defeats the purpose.
+
+**Trade-off:** A task that ultimately gets rejected still consumes compute and API tokens. This is acceptable because the diff and audit data are still valuable for review, and the cost is bounded by `cost_budget_usd`.
+
+## 16. Restrictive Policy Merge Semantics
+
+**Decision:** Task-level overrides can only narrow access, never widen it. Allowlists use intersection, deny lists use union, numerics use minimum.
+
+**Reasoning:**
+- If task overrides could widen access, presets would not be trustworthy security boundaries.
+- Intersection for allowlists means a task requesting `["cargo"]` against preset `["npm", "pip"]` gets `[]` — not `["npm", "pip", "cargo"]`.
+- This is the only safe default for a system where task input comes from potentially untrusted sources.
+
+**Trade-off:** Tasks cannot request access beyond their preset. If a task needs `cargo` and the preset doesn't include it, the admin must create or modify a preset. This is intentional friction.
+
+## 17. Signed Approval Links Instead of Raw API Tokens in URLs
+
+**Decision:** The approval UI uses HMAC-signed, time-limited tokens scoped to a specific task+action pair. Actual approve/reject actions require the user to enter their own API token.
+
+**Reasoning:**
+- Raw API tokens in URLs leak via browser history, server logs, referrer headers, and shared links.
+- Signed links grant read-only view access (1-hour TTL) — safe to share in Slack channels.
+- Approve/reject uses `Authorization: Bearer` header with a token that has `tasks:approve` scope.
+- This separates "who can see the approval page" from "who can approve."
+
+**Trade-off:** The approval flow requires two steps (click link, then enter token). This is intentional friction for a security-sensitive action.

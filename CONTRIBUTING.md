@@ -50,11 +50,16 @@ src/sandclaude/
 │   └── server.py          # MCP server for Claude Code plugin
 ├── db/
 │   └── store.py           # aiosqlite persistence
-├── auth.py                # Bearer token authentication
+├── auth.py                # Bearer token auth + scoped tokens + signed approval links
 ├── cli.py                 # CLI entrypoint (sandclaude init)
 ├── config.py              # Configuration from environment variables
 ├── github.py              # GitHub PR creation via gh CLI + AI-generated summaries
-└── models.py              # Pydantic models and shared types
+├── models.py              # Pydantic models and shared types
+├── policy.py              # Policy preset merge semantics + enforcement
+├── presets.py             # Built-in policy presets (bugfix-pr, docs-only, etc.)
+├── risk.py                # Task risk assessment engine
+└── templates/
+    └── approve.html       # Server-rendered approval UI page
 
 docker-entrypoint-api.sh   # API container entrypoint (gosu privilege drop)
 tests/                     # pytest test suite
