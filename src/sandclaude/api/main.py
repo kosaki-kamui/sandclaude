@@ -26,16 +26,34 @@ import secrets as _secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
-from sandclaude.auth import init_token, token_fingerprint, verify_token
+from sandclaude.auth import (
+    generate_token,
+    init_token,
+    require_scope,
+    token_fingerprint,
+    verify_token,
+    verify_token_with_scopes,
+)
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.github import create_pr
-from sandclaude.models import CreatePRRequest, TaskCreateRequest, TaskPriority, TaskStatus
+from sandclaude.models import (
+    ApprovalDecisionRequest,
+    ApprovalStatus,
+    CreatePRRequest,
+    TaskCreateRequest,
+    TaskPriority,
+    TaskStatus,
+    TokenCreateRequest,
+    TokenCreateResponse,
+)
 from sandclaude.runner.container import cancel_container, recover_orphans
 from sandclaude.runner.pool import get_pool_stats, submit_task
 
@@ -91,6 +109,12 @@ async def lifespan(application: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     await db.init_db()
     init_token()
+    # v0.2.0: Seed built-in policy presets
+    from sandclaude.presets import seed_builtin_presets
+
+    seeded = await seed_builtin_presets()
+    if seeded:
+        logger.info("Seeded %d built-in policy preset(s)", seeded)
     logger.info("Data directory: %s", settings.data_dir.resolve())
     # Block multi-worker startup — pool and rate limit state is process-local.
     # Check both WEB_CONCURRENCY env var and uvicorn --workers CLI arg.
@@ -129,7 +153,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="sandclaude", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="sandclaude", version="0.2.0", lifespan=lifespan)
 security = HTTPBearer(auto_error=False)
 
 
@@ -148,12 +172,13 @@ def _sanitize_error(exc: Exception) -> str:
 # ── Auth dependency ────────────────────────────────────────────
 
 
-def _require_auth(
+async def _require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> str:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    verify_token(credentials.credentials)
+    # v0.2.0: Accept both legacy tokens and registry tokens
+    await verify_token_with_scopes(credentials.credentials)
     return credentials.credentials
 
 
@@ -211,7 +236,7 @@ def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 # ── Pool stats ─────────────────────────────────────────────────
@@ -247,6 +272,22 @@ async def create_task_endpoint(
             detail="repo must be '.', an absolute path (e.g., /home/user/project), or a git URL.",
         )
 
+    # v0.2.0: Pre-creation policy checks (repo/branch validation)
+    if request.policy_preset:
+        from sandclaude.policy import check_branch_allowed, check_repo_allowed
+
+        pre_preset = await db.get_policy_preset(request.policy_preset)
+        if pre_preset:
+            from sandclaude.models import PolicyPresetConfig
+
+            pre_policy = PolicyPresetConfig(**pre_preset.config)
+            repo_err = check_repo_allowed(pre_policy, request.repo)
+            if repo_err:
+                raise HTTPException(status_code=403, detail=repo_err)
+            branch_err = check_branch_allowed(pre_policy, request.branch)
+            if branch_err:
+                raise HTTPException(status_code=403, detail=branch_err)
+
     task_id = f"task-{_secrets.token_hex(8)}"
     task = await db.create_task(
         task_id=task_id,
@@ -261,7 +302,16 @@ async def create_task_endpoint(
         allowed_domains=request.allowed_domains,
         notify_webhook=request.notify.webhook if request.notify else None,
         notify_on=request.notify.on if request.notify else None,
+        policy_preset=request.policy_preset,
+        declared_secrets=request.declared_secrets,
+        cost_budget_usd=request.cost_budget_usd,
     )
+
+    # Resolve policy and create approval gates if needed
+    from sandclaude.policy import create_required_gates, resolve_effective_policy
+
+    policy = await resolve_effective_policy(task)
+    await create_required_gates(task_id, policy)
 
     await submit_task(task)
     return task.safe_dump()  # S11: exclude internal fields
@@ -406,10 +456,10 @@ async def delete_task_endpoint(task_id: str, token: str = Depends(_require_auth)
         raise HTTPException(status_code=404, detail="Task not found")
     _require_task_owner(task.owner_token_hash, token)
 
-    if task.status in (TaskStatus.setup, TaskStatus.running):
+    if task.status in (TaskStatus.setup, TaskStatus.running, TaskStatus.pending_approval):
         raise HTTPException(
             status_code=409,
-            detail="Cannot delete a running task. Cancel it first.",
+            detail="Cannot delete an active task. Cancel it first.",
         )
 
     await db.delete_task(task_id)
@@ -464,11 +514,665 @@ async def create_pr_endpoint(
             detail=f"Cannot create PR for task in status: {task.status.value}",
         )
 
+    # v0.2.0: Check approval gate for create_pr action
+    gates = await db.get_approval_gates(task_id)
+    pr_gate = next((g for g in gates if g.action == "create_pr"), None)
+    if pr_gate and pr_gate.status == ApprovalStatus.pending:
+        raise HTTPException(
+            status_code=409,
+            detail="PR creation requires approval. Use POST /tasks/{task_id}/approve/create_pr",
+        )
+    if pr_gate and pr_gate.status == ApprovalStatus.rejected:
+        raise HTTPException(
+            status_code=403,
+            detail="PR creation was rejected for this task.",
+        )
+
     try:
         result = await create_pr(task, title=body.title if body else None)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_sanitize_error(exc))  # S9
+
+
+# ── v0.2.0: Approval gates ────────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/approvals")
+async def list_approvals_endpoint(task_id: str, token: str = Depends(_require_auth)) -> list[dict]:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+    gates = await db.get_approval_gates(task_id)
+    return [g.model_dump() for g in gates]
+
+
+@app.post("/tasks/{task_id}/approve/{action}")
+async def approve_action_endpoint(
+    task_id: str,
+    action: str,
+    body: ApprovalDecisionRequest | None = None,
+    token: str = Depends(_require_auth),
+) -> dict:
+    # Scope check: approval requires explicit tasks:approve permission
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "tasks:approve")
+
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    ok = await db.decide_approval_gate(
+        task_id,
+        action,
+        decision=ApprovalStatus.approved,
+        decided_by=auth.fingerprint,
+        reason=body.reason if body else None,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending approval gate found")
+
+    # Update task if no more pending gates
+    if not await db.has_pending_gates(task_id):
+        await db.update_task(task_id, requires_approval=0)
+
+    return {"status": "approved", "task_id": task_id, "action": action}
+
+
+@app.post("/tasks/{task_id}/reject/{action}")
+async def reject_action_endpoint(
+    task_id: str,
+    action: str,
+    body: ApprovalDecisionRequest | None = None,
+    token: str = Depends(_require_auth),
+) -> dict:
+    # Scope check: rejection also requires explicit tasks:approve permission
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "tasks:approve")
+
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    ok = await db.decide_approval_gate(
+        task_id,
+        action,
+        decision=ApprovalStatus.rejected,
+        decided_by=auth.fingerprint,
+        reason=body.reason if body else None,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending approval gate found")
+
+    return {"status": "rejected", "task_id": task_id, "action": action}
+
+
+@app.post("/tasks/{task_id}/approval-link/{action}")
+async def generate_approval_link_endpoint(
+    task_id: str,
+    action: str,
+    token: str = Depends(_require_auth),
+) -> dict:
+    """Generate a signed, short-lived approval link for a task action.
+
+    The link can be shared in Slack notifications or webhooks.
+    It grants read-only access to the approval page — the user must
+    enter their own API token to actually approve or reject.
+    """
+    from sandclaude.auth import create_approval_link_token
+
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    link_token = create_approval_link_token(task_id, action)
+    base_url = settings.api_url.rstrip("/")
+    url = f"{base_url}/approve/{task_id}/{action}?token={link_token}"
+
+    return {"approval_url": url, "expires_in_seconds": 3600}
+
+
+# ── v0.2.0: Approval UI (server-rendered) ────────────────────
+
+
+@app.get("/approve/{task_id}/{action}")
+async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLResponse:
+    """Server-rendered approval page. Linked from Slack/webhook notifications.
+
+    Uses a signed, short-lived approval token (NOT a raw API token).
+    The approval link token:
+    - Is HMAC-signed with the server's primary key
+    - Expires after 1 hour
+    - Is scoped to a specific task_id + action pair
+    - Cannot be used for general API access
+    """
+    from sandclaude.auth import verify_approval_link_token
+
+    if not token:
+        return HTMLResponse("<h1>401 — Missing or expired approval link</h1>", status_code=401)
+    if not verify_approval_link_token(token, task_id, action):
+        return HTMLResponse("<h1>401 — Invalid or expired approval link</h1>", status_code=401)
+
+    task = await db.get_task(task_id)
+    if not task:
+        return HTMLResponse("<h1>404 — Task not found</h1>", status_code=404)
+
+    gates = await db.get_approval_gates(task_id)
+    has_pending = any(g.status.value == "pending" for g in gates)
+
+    # Build context
+    diff_preview = ""
+    risk_level = "low"
+    risk_reasons: list[str] = []
+    files_changed: list[str] = []
+
+    task_dir = settings.data_dir / "tasks" / task.id
+    diff_path = task_dir / "diff.patch"
+    if diff_path.exists():
+        try:
+            raw_diff = diff_path.read_text()[:10000]
+            diff_preview = _colorize_diff(raw_diff)
+            from sandclaude.risk import generate_risk_summary
+
+            audit_path = task_dir / "audit.json"
+            audit: dict = {}
+            if audit_path.exists():
+                audit = json.loads(audit_path.read_text())
+            summary = generate_risk_summary(raw_diff, audit)
+            risk_level = summary.risk_level
+            risk_reasons = summary.risk_reasons
+            files_changed = summary.files_changed
+        except Exception as exc:
+            logger.warning("Error loading diff/audit for approval UI %s: %s", task_id, exc)
+            diff_preview = "(error reading diff or audit data)"
+
+    duration = "?"
+    if task.started_at and task.completed_at:
+        try:
+            from datetime import datetime
+
+            s = datetime.fromisoformat(task.started_at.replace("Z", "+00:00"))
+            e = datetime.fromisoformat(task.completed_at.replace("Z", "+00:00"))
+            secs = (e - s).total_seconds()
+            duration = f"{secs / 60:.1f}m" if secs >= 60 else f"{secs:.0f}s"
+        except Exception:
+            pass
+
+    from pathlib import Path
+
+    from jinja2 import Environment, FileSystemLoader
+
+    template_dir = Path(__file__).parent.parent / "templates"
+    env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
+    template = env.get_template("approve.html")
+
+    html = template.render(
+        task_id=task.id,
+        action=action,
+        prompt=task.prompt[:500],
+        model=task.model,
+        duration=duration,
+        cost=f"{task.total_cost_usd:.4f}" if task.total_cost_usd else "?",
+        risk_level=risk_level,
+        risk_reasons=risk_reasons,
+        files_changed=files_changed,
+        diff_preview=diff_preview,
+        gates=[{"status": g.status.value, "action": g.action, "reason": g.reason} for g in gates],
+        has_pending=has_pending,
+    )
+    return HTMLResponse(html)
+
+
+def _colorize_diff(diff: str) -> str:
+    """Simple HTML colorization for diff preview (escaped)."""
+    import html
+
+    lines = []
+    for line in diff.split("\n")[:200]:
+        escaped = html.escape(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            lines.append(f'<span class="diff-add">{escaped}</span>')
+        elif line.startswith("-") and not line.startswith("---"):
+            lines.append(f'<span class="diff-del">{escaped}</span>')
+        elif line.startswith("@@") or line.startswith("diff "):
+            lines.append(f'<span class="diff-header">{escaped}</span>')
+        else:
+            lines.append(escaped)
+    return "\n".join(lines)
+
+
+# ── v0.2.0: Token management ─────────────────────────────────
+
+
+@app.post("/tokens", status_code=201)
+async def create_token_endpoint(
+    request: TokenCreateRequest, token: str = Depends(_require_auth)
+) -> dict:
+    # Only admin-scoped tokens can create new tokens
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+
+    from datetime import datetime, timedelta, timezone
+
+    raw_token = generate_token()
+    fp = token_fingerprint(raw_token)
+
+    expires_at = None
+    if request.expires_in_days:
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
+        ).isoformat()
+
+    token_info = await db.create_token(
+        name=request.name,
+        token_hash=fp,
+        scopes=request.scopes,
+        expires_at=expires_at,
+        created_by=auth.fingerprint,
+    )
+
+    return TokenCreateResponse(
+        id=token_info.id,
+        name=token_info.name,
+        token=raw_token,
+        scopes=token_info.scopes,
+        created_at=token_info.created_at,
+        expires_at=token_info.expires_at,
+    ).model_dump()
+
+
+@app.get("/tokens")
+async def list_tokens_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+    tokens = await db.list_tokens()
+    # Never return the token_hash in list responses
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "scopes": t.scopes,
+            "created_at": t.created_at,
+            "expires_at": t.expires_at,
+            "revoked_at": t.revoked_at,
+            "is_active": t.is_active(),
+        }
+        for t in tokens
+    ]
+
+
+@app.post("/tokens/{token_id}/revoke")
+async def revoke_token_endpoint(token_id: int, token: str = Depends(_require_auth)) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+    ok = await db.revoke_token(token_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Token not found or already revoked")
+    return {"revoked": token_id}
+
+
+# ── v0.2.0: Policy presets ───────────────────────────────────
+
+
+@app.put("/policies/{name}")
+async def save_policy_endpoint(
+    name: str, config: dict, token: str = Depends(_require_auth)
+) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    if not re.match(r"^[a-z0-9_-]{1,64}$", name):
+        raise HTTPException(status_code=400, detail="Invalid preset name")
+    preset = await db.save_policy_preset(name, config)
+    return preset.model_dump()
+
+
+@app.get("/policies")
+async def list_policies_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    presets = await db.list_policy_presets()
+    return [p.model_dump() for p in presets]
+
+
+@app.get("/policies/{name}")
+async def get_policy_endpoint(name: str, token: str = Depends(_require_auth)) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    preset = await db.get_policy_preset(name)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return preset.model_dump()
+
+
+@app.delete("/policies/{name}")
+async def delete_policy_endpoint(name: str, token: str = Depends(_require_auth)) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    ok = await db.delete_policy_preset(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"deleted": name}
+
+
+# ── v0.2.0: Risk summary ─────────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/risk")
+async def get_risk_summary_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    """Get a structured risk assessment for a completed task."""
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Risk summary requires a completed task (current: {task.status.value})",
+        )
+
+    task_dir = settings.data_dir / "tasks" / task.id
+    diff_path = task_dir / "diff.patch"
+    audit_path = task_dir / "audit.json"
+
+    if not diff_path.exists():
+        raise HTTPException(status_code=404, detail="Diff not available")
+
+    diff = await _read_file_async(diff_path)
+    audit_data: dict = {}
+    if audit_path.exists():
+        raw = await _read_json_async(audit_path)
+        if isinstance(raw, dict):
+            audit_data = raw
+
+    from sandclaude.risk import generate_risk_summary
+
+    summary = generate_risk_summary(
+        diff,
+        audit_data,
+        tokens_input=task.tokens_input or 0,
+        tokens_output=task.tokens_output or 0,
+        cost_usd=task.total_cost_usd or 0.0,
+    )
+
+    from dataclasses import asdict
+
+    return asdict(summary)
+
+
+# ── v0.2.0: Review mode ─────────────────────────────────────
+
+
+@app.post("/tasks/{task_id}/review")
+async def review_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    """Use Claude to review a completed task's diff and produce a review report.
+
+    Returns risks, missing tests, suspicious changes, and files
+    that deserve extra reviewer attention.
+    """
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Review requires a completed task (current: {task.status.value})",
+        )
+
+    task_dir = settings.data_dir / "tasks" / task.id
+    diff_path = task_dir / "diff.patch"
+    if not diff_path.exists():
+        raise HTTPException(status_code=404, detail="Diff not available")
+
+    diff = await _read_file_async(diff_path)
+
+    if not settings.anthropic_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Review mode requires ANTHROPIC_API_KEY",
+        )
+
+    try:
+        review = await _generate_ai_review(task.prompt, diff)
+        return {"task_id": task_id, "review": review}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_sanitize_error(exc))
+
+
+async def _generate_ai_review(prompt: str, diff: str) -> dict:
+    """Use Claude Haiku to review a diff and produce structured feedback."""
+    import httpx
+
+    diff_excerpt = diff[:8000]
+    if len(diff) > 8000:
+        diff_excerpt += "\n... (truncated)"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": settings.anthropic_api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 1000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "You are a senior code reviewer. Review this diff "
+                            "and produce a structured assessment. Respond in "
+                            "JSON with these fields:\n"
+                            '- "risks": list of major risk strings\n'
+                            '- "missing_tests": list of areas that lack test '
+                            "coverage\n"
+                            '- "suspicious_changes": list of changes that look '
+                            "unusual or potentially problematic\n"
+                            '- "security_concerns": list of security issues\n'
+                            '- "attention_files": list of files deserving extra'
+                            " review\n"
+                            '- "summary": 2-3 sentence overall assessment\n\n'
+                            "Be concise. Only flag genuine concerns, not style "
+                            "nitpicks.\n\n"
+                            f"Task prompt: {prompt[:500]}\n\n"
+                            f"Diff:\n{diff_excerpt}"
+                        ),
+                    }
+                ],
+            },
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Review API call failed: {resp.status_code}")
+
+    data = resp.json()
+    content = data.get("content", [])
+    if content and content[0].get("type") == "text":
+        text = content[0]["text"].strip()
+        # Try to parse JSON from the response
+        import json as _json
+
+        # Handle markdown code fences
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+            text = re.sub(r"\n?```\s*$", "", text)
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            return {"summary": text, "raw": True}
+
+    raise RuntimeError("Empty review response")
+
+
+# ── v0.2.0: Task secrets audit ───────────────────────────────
+
+
+@app.get("/tasks/{task_id}/secrets")
+async def get_task_secrets_endpoint(
+    task_id: str, token: str = Depends(_require_auth)
+) -> list[dict]:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+    return await db.get_task_secrets(task_id)
+
+
+# ── v0.2.0: Retry / follow-up ─────────────────────────────────
+
+
+class RetryRequest(BaseModel):
+    prompt: str = Field(..., max_length=100_000)
+    max_turns: int | None = Field(None, ge=1, le=500)
+
+
+@app.post("/tasks/{task_id}/retry", status_code=201)
+async def retry_task_endpoint(
+    task_id: str,
+    body: RetryRequest,
+    token: str = Depends(_require_auth),
+) -> dict:
+    """Create a follow-up task that references the original.
+
+    The new task runs against the same repo/branch with a new prompt,
+    typically used for addressing review feedback or fixing test failures.
+    """
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status not in (TaskStatus.completed, TaskStatus.failed):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only retry completed or failed tasks (current: {task.status.value})",
+        )
+
+    # Build follow-up prompt with context from original task
+    follow_up_prompt = (
+        f"This is a follow-up to a previous task.\n\n"
+        f"Original prompt: {task.prompt[:500]}\n\n"
+        f"Follow-up instructions: {body.prompt}"
+    )
+
+    new_task_id = f"task-{_secrets.token_hex(8)}"
+    new_task = await db.create_task(
+        task_id=new_task_id,
+        repo=task.repo,
+        branch=task.branch,
+        prompt=follow_up_prompt,
+        model=task.model,
+        max_turns=body.max_turns or task.max_turns,
+        priority=task.priority,
+        owner_token_hash=token_fingerprint(token),
+        host_cwd=task.host_cwd,
+        policy_preset=task.policy_preset,
+        cost_budget_usd=task.cost_budget_usd,
+    )
+
+    from sandclaude.policy import create_required_gates, resolve_effective_policy
+
+    policy = await resolve_effective_policy(new_task)
+    await create_required_gates(new_task_id, policy)
+
+    await submit_task(new_task)
+    return new_task.safe_dump()
+
+
+# ── v0.2.0: Task bundle export ───────────────────────────────
+
+
+@app.get("/tasks/{task_id}/bundle")
+async def export_bundle_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+    """Export a reproducible task bundle with all artifacts.
+
+    Returns a JSON bundle containing prompt, repo, diff, audit, cost,
+    policies applied, and outcome metadata — useful for debugging,
+    compliance, and incident review.
+    """
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    bundle: dict = {
+        "version": "0.2.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "task": task.safe_dump(),
+    }
+
+    task_dir = settings.data_dir / "tasks" / task.id
+
+    # Include diff
+    diff_path = task_dir / "diff.patch"
+    if diff_path.exists():
+        try:
+            bundle["diff"] = await _read_file_async(diff_path)
+        except Exception:
+            bundle["diff"] = None
+
+    # Include audit
+    audit_path = task_dir / "audit.json"
+    if audit_path.exists():
+        try:
+            bundle["audit"] = await _read_json_async(audit_path)
+        except Exception:
+            bundle["audit"] = None
+
+    # Include result
+    result_path = task_dir / "result.json"
+    if result_path.exists():
+        try:
+            bundle["result"] = await _read_json_async(result_path)
+        except Exception:
+            bundle["result"] = None
+
+    # Include approval gates
+    gates = await db.get_approval_gates(task_id)
+    bundle["approval_gates"] = [g.model_dump() for g in gates]
+
+    # Include secrets audit
+    secrets = await db.get_task_secrets(task_id)
+    bundle["secrets_audit"] = secrets
+
+    # Include applied policy
+    if task.policy_preset:
+        preset = await db.get_policy_preset(task.policy_preset)
+        bundle["applied_policy"] = preset.model_dump() if preset else None
+
+    # Include risk summary if diff exists
+    if bundle.get("diff"):
+        from dataclasses import asdict
+
+        from sandclaude.risk import generate_risk_summary
+
+        summary = generate_risk_summary(
+            bundle["diff"],
+            bundle.get("audit") or {},
+            tokens_input=task.tokens_input or 0,
+            tokens_output=task.tokens_output or 0,
+            cost_usd=task.total_cost_usd or 0.0,
+        )
+        bundle["risk_summary"] = asdict(summary)
+
+    return bundle
 
 
 # ── WebSocket /tasks/{task_id}/stream ──────────────────────────
@@ -547,6 +1251,7 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
                 TaskStatus.completed,
                 TaskStatus.failed,
                 TaskStatus.cancelled,
+                TaskStatus.pending_approval,
             ):
                 await ws.send_json(
                     {

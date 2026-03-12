@@ -49,6 +49,7 @@ class TaskStatus(str, Enum):
     queued = "queued"
     setup = "setup"
     running = "running"
+    pending_approval = "pending_approval"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -90,6 +91,9 @@ class TaskCreateRequest(BaseModel):
     host_cwd: str | None = None  # injected by MCP plugin when repo="."
     allowed_domains: list[str] | None = None  # extra domains allowed in agent phase
     notify: NotifyConfig | None = None
+    policy_preset: str | None = Field(None, max_length=64)
+    declared_secrets: list[str] | None = None  # secret names this task needs
+    cost_budget_usd: float | None = Field(None, ge=0.0, le=10000.0)
 
     @field_validator("repo")
     @classmethod
@@ -156,6 +160,10 @@ class Task(BaseModel):
     tokens_output: int | None = None
     total_cost_usd: float | None = None
     error: str | None = None
+    policy_preset: str | None = None
+    requires_approval: int = 0  # 1 if any gate is pending
+    declared_secrets: str | None = None  # JSON-encoded list of requested secret names
+    cost_budget_usd: float | None = None
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""
@@ -194,3 +202,148 @@ class TranscriptEntry(BaseModel):
     timestamp: str
     type: str
     content: str
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Approval gates
+# ---------------------------------------------------------------------------
+
+
+class ApprovalStatus(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
+class ApprovalGate(BaseModel):
+    id: int = 0
+    task_id: str
+    action: str  # 'create_pr', 'push', etc.
+    status: ApprovalStatus = ApprovalStatus.pending
+    reason: str | None = None
+    decided_by: str | None = None  # token fingerprint
+    decided_at: str | None = None
+    created_at: str = ""
+
+
+class ApprovalDecisionRequest(BaseModel):
+    reason: str | None = Field(None, max_length=1000)
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Token scopes
+# ---------------------------------------------------------------------------
+
+# Valid scope values
+VALID_SCOPES = frozenset(
+    {
+        "tasks:create",
+        "tasks:read",
+        "tasks:cancel",
+        "tasks:delete",
+        "tasks:approve",
+        "prs:create",
+        "admin:tokens",
+        "admin:policies",
+    }
+)
+
+
+class TokenInfo(BaseModel):
+    id: int = 0
+    name: str
+    token_hash: str
+    scopes: list[str] = Field(default_factory=list)
+    created_at: str = ""
+    expires_at: str | None = None
+    revoked_at: str | None = None
+    created_by: str | None = None
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in self.scopes or "admin:*" in self.scopes
+
+    def is_active(self) -> bool:
+        if self.revoked_at is not None:
+            return False
+        if self.expires_at is not None:
+            from datetime import datetime, timezone
+
+            try:
+                exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+                return datetime.now(timezone.utc) < exp
+            except (ValueError, AttributeError):
+                return False
+        return True
+
+
+class TokenCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+    scopes: list[str]
+    expires_in_days: int | None = Field(None, ge=1, le=365)
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("At least one scope is required")
+        for s in value:
+            if s not in VALID_SCOPES:
+                raise ValueError(f"Invalid scope: {s}. Valid: {sorted(VALID_SCOPES)}")
+        return value
+
+
+class TokenCreateResponse(BaseModel):
+    """Returned only once at creation — includes the raw token."""
+
+    id: int
+    name: str
+    token: str  # raw token, shown only once
+    scopes: list[str]
+    created_at: str
+    expires_at: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Policy presets
+# ---------------------------------------------------------------------------
+
+
+class PolicyPreset(BaseModel):
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str | None = None
+
+
+class PolicyPresetConfig(BaseModel):
+    """Schema for the JSON config blob inside a preset."""
+
+    allowed_commands: list[str] | None = None
+    allowed_write_paths: list[str] | None = None
+    allowed_domains: list[str] | None = None
+    allowed_secrets: list[str] | None = None
+    allow_pr_creation: bool = True
+    requires_approval_for: list[str] | None = None  # actions requiring approval
+    max_turns: int | None = None
+    max_cost_usd: float | None = None
+    timeout_s: int | None = None
+    model: str | None = None
+    # v0.2.0 Phase 4: Repo and branch policy
+    allowed_repos: list[str] | None = None  # repo URL patterns or "." for local
+    blocked_branches: list[str] | None = None  # branches that cannot be targeted
+    pr_only: bool = False  # if True, direct push is blocked (only PRs allowed)
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Network deny explainability
+# ---------------------------------------------------------------------------
+
+
+class NetworkDeny(BaseModel):
+    """Structured record of a denied network request."""
+
+    domain: str
+    ip: str | None = None
+    port: int | None = None
+    reason: str  # 'not_allowlisted', 'private_ip', 'policy_reject', 'stale_ip'
+    explanation: str  # human-readable message
