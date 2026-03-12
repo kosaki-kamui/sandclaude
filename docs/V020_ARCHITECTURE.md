@@ -258,9 +258,11 @@ SECRET_DATABASE_URL=postgres://...
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Approval model | Gate actions (PR, push), not execution | Preserve fire-and-forget; approver needs the diff to review |
-| Rejection state | `failed` with `error="approval_rejected"` | Avoid new terminal state complexity |
+| Approval state | `pending_approval` is a first-class `TaskStatus` | Unambiguous lifecycle; WebSocket reports it as terminal |
+| Approval links | HMAC-signed, 1-hour TTL, scoped to task+action | View-only access via URL; approve/reject requires user's own API token |
 | Schema approach | Additive migrations in init_db() | SQLite ADD COLUMN only; no data migration |
-| Preset merge | Union for lists, cap for numerics, override for scalars | Presets set ceilings, tasks extend within bounds |
+| Preset merge | **Restrictive**: intersection for allowlists, union for denylists, minimum for numerics | Task overrides can only narrow access, never widen |
+| Token scopes | Named tokens with scopes, expiry, revocation; legacy tokens as admin | Backward compatible; scoped tokens for team deployments |
 | Compatibility | Breaking release, but backward-compatible defaults | Existing users upgrade with zero config changes |
-| Web console | Server-rendered approval page only | Full console deferred to v0.3.0 |
+| Approval UI | Server-rendered Jinja2 page, no frontend framework | Full console deferred to v0.3.0 |
 | Secrets | Declared in request, resolved by server, scoped to presets | Minimal viable model; no vault, no rotation |

@@ -172,12 +172,13 @@ def _sanitize_error(exc: Exception) -> str:
 # ── Auth dependency ────────────────────────────────────────────
 
 
-def _require_auth(
+async def _require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> str:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-    verify_token(credentials.credentials)
+    # v0.2.0: Accept both legacy tokens and registry tokens
+    await verify_token_with_scopes(credentials.credentials)
     return credentials.credentials
 
 
@@ -270,6 +271,22 @@ async def create_task_endpoint(
             status_code=400,
             detail="repo must be '.', an absolute path (e.g., /home/user/project), or a git URL.",
         )
+
+    # v0.2.0: Pre-creation policy checks (repo/branch validation)
+    if request.policy_preset:
+        from sandclaude.policy import check_branch_allowed, check_repo_allowed
+
+        pre_preset = await db.get_policy_preset(request.policy_preset)
+        if pre_preset:
+            from sandclaude.models import PolicyPresetConfig
+
+            pre_policy = PolicyPresetConfig(**pre_preset.config)
+            repo_err = check_repo_allowed(pre_policy, request.repo)
+            if repo_err:
+                raise HTTPException(status_code=403, detail=repo_err)
+            branch_err = check_branch_allowed(pre_policy, request.branch)
+            if branch_err:
+                raise HTTPException(status_code=403, detail=branch_err)
 
     task_id = f"task-{_secrets.token_hex(8)}"
     task = await db.create_task(

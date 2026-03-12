@@ -41,15 +41,54 @@ These are documented architectural limitations, not vulnerabilities:
 
 See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for the full list of architectural trade-offs.
 
+### v0.2.0: Approval UI Security Model
+
+The approval UI at `GET /approve/{task_id}/{action}` uses a layered security model:
+
+**View access (reading the approval page):**
+- Requires a signed, short-lived approval link token (HMAC-SHA256, 1-hour TTL)
+- Token is scoped to a specific `task_id` + `action` pair
+- Token is generated via `POST /tasks/{id}/approval-link/{action}` by an authenticated user
+- Suitable for embedding in Slack notifications or webhook payloads
+- Token cannot be used for any other API operation
+
+**Action access (approving or rejecting):**
+- Requires the user to enter their own API token directly in the UI
+- API token must have `tasks:approve` scope (checked server-side via `verify_token_with_scopes`)
+- Approval/rejection is attributed to the approver's token fingerprint in the audit log
+- The API token is transmitted via `Authorization: Bearer` header (never in the URL)
+
+**What this means:**
+- Approval links can be safely shared in team channels — they grant read-only view access
+- The person who clicks the link is not automatically authorized to approve
+- Approval decisions are always attributable to a specific identity (token fingerprint)
+- Expired or tampered approval links fail with a clear error
+
+**Known limitation:**
+- Approval link tokens appear in URLs (browser history, server logs). Since they expire in 1 hour and grant read-only access to a single task, the exposure window is narrow. For environments where this is unacceptable, use the API endpoints directly (`POST /tasks/{id}/approve/{action}` with `Authorization: Bearer`).
+
+### v0.2.0: Policy Merge Security Model
+
+Policy presets use **restrictive composition**: task-level overrides can only narrow access, never widen it.
+
+- **Allowlists** (commands, domains, paths, secrets, repos): intersection — a task cannot grant itself access beyond the preset
+- **Deny lists** (blocked branches, required approvals): union — a task can add restrictions but not remove preset denies
+- **Numeric ceilings** (cost, turns, timeout): minimum wins — a task can lower but not raise the ceiling
+- **Restriction booleans** (pr_only): True always wins
+- **Permissive booleans** (allow_pr_creation): False always wins
+
+This ensures presets are trustworthy security boundaries regardless of what task-level input says.
+
 ## Supported Versions
 
 | Version | Supported |
 |---------|-----------|
+| 0.2.x   | Yes       |
 | 0.1.x   | Yes       |
 
 ## Security Checklist for Contributors
 
-When modifying security-critical code (`src/sandclaude/runner/container.py`, `src/sandclaude/auth.py`, `src/sandclaude/runner/entrypoint.py`, `docker-entrypoint-api.sh`):
+When modifying security-critical code (`src/sandclaude/runner/container.py`, `src/sandclaude/auth.py`, `src/sandclaude/policy.py`, `src/sandclaude/runner/entrypoint.py`, `docker-entrypoint-api.sh`):
 
 - [ ] iptables rules still block all outbound except api.anthropic.com + allowed_domains
 - [ ] Bearer tokens are never logged or exposed in error messages
@@ -57,3 +96,8 @@ When modifying security-critical code (`src/sandclaude/runner/container.py`, `sr
 - [ ] API keys are never written to disk inside containers
 - [ ] Container cleanup happens in `finally` blocks (no leaked containers)
 - [ ] New env vars are documented in `.env.example`
+- [ ] Policy merge uses restrictive semantics (intersection for allowlists, not union)
+- [ ] Approval endpoints require `tasks:approve` scope
+- [ ] Approval link tokens are signed, scoped, and time-limited
+- [ ] Secrets are scrubbed from container environment before agent phase
+- [ ] Audit logs record secret names (never values) and approval decisions with attribution
