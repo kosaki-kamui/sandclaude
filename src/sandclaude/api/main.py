@@ -31,11 +31,27 @@ from fastapi import Depends, FastAPI, HTTPException, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from sandclaude.auth import init_token, token_fingerprint, verify_token
+from sandclaude.auth import (
+    generate_token,
+    init_token,
+    require_scope,
+    token_fingerprint,
+    verify_token,
+    verify_token_with_scopes,
+)
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.github import create_pr
-from sandclaude.models import CreatePRRequest, TaskCreateRequest, TaskPriority, TaskStatus
+from sandclaude.models import (
+    ApprovalDecisionRequest,
+    ApprovalStatus,
+    CreatePRRequest,
+    TaskCreateRequest,
+    TaskPriority,
+    TaskStatus,
+    TokenCreateRequest,
+    TokenCreateResponse,
+)
 from sandclaude.runner.container import cancel_container, recover_orphans
 from sandclaude.runner.pool import get_pool_stats, submit_task
 
@@ -261,7 +277,16 @@ async def create_task_endpoint(
         allowed_domains=request.allowed_domains,
         notify_webhook=request.notify.webhook if request.notify else None,
         notify_on=request.notify.on if request.notify else None,
+        policy_preset=request.policy_preset,
+        declared_secrets=request.declared_secrets,
+        cost_budget_usd=request.cost_budget_usd,
     )
+
+    # Resolve policy and create approval gates if needed
+    from sandclaude.policy import create_required_gates, resolve_effective_policy
+
+    policy = await resolve_effective_policy(task)
+    await create_required_gates(task_id, policy)
 
     await submit_task(task)
     return task.safe_dump()  # S11: exclude internal fields
@@ -406,10 +431,10 @@ async def delete_task_endpoint(task_id: str, token: str = Depends(_require_auth)
         raise HTTPException(status_code=404, detail="Task not found")
     _require_task_owner(task.owner_token_hash, token)
 
-    if task.status in (TaskStatus.setup, TaskStatus.running):
+    if task.status in (TaskStatus.setup, TaskStatus.running, TaskStatus.pending_approval):
         raise HTTPException(
             status_code=409,
-            detail="Cannot delete a running task. Cancel it first.",
+            detail="Cannot delete an active task. Cancel it first.",
         )
 
     await db.delete_task(task_id)
@@ -464,11 +489,223 @@ async def create_pr_endpoint(
             detail=f"Cannot create PR for task in status: {task.status.value}",
         )
 
+    # v0.2.0: Check approval gate for create_pr action
+    gates = await db.get_approval_gates(task_id)
+    pr_gate = next((g for g in gates if g.action == "create_pr"), None)
+    if pr_gate and pr_gate.status == ApprovalStatus.pending:
+        raise HTTPException(
+            status_code=409,
+            detail="PR creation requires approval. Use POST /tasks/{task_id}/approve/create_pr",
+        )
+    if pr_gate and pr_gate.status == ApprovalStatus.rejected:
+        raise HTTPException(
+            status_code=403,
+            detail="PR creation was rejected for this task.",
+        )
+
     try:
         result = await create_pr(task, title=body.title if body else None)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_sanitize_error(exc))  # S9
+
+
+# ── v0.2.0: Approval gates ────────────────────────────────────
+
+
+@app.get("/tasks/{task_id}/approvals")
+async def list_approvals_endpoint(
+    task_id: str, token: str = Depends(_require_auth)
+) -> list[dict]:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+    gates = await db.get_approval_gates(task_id)
+    return [g.model_dump() for g in gates]
+
+
+@app.post("/tasks/{task_id}/approve/{action}")
+async def approve_action_endpoint(
+    task_id: str,
+    action: str,
+    body: ApprovalDecisionRequest | None = None,
+    token: str = Depends(_require_auth),
+) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    ok = await db.decide_approval_gate(
+        task_id, action,
+        decision=ApprovalStatus.approved,
+        decided_by=token_fingerprint(token),
+        reason=body.reason if body else None,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending approval gate found")
+
+    # Update task if no more pending gates
+    if not await db.has_pending_gates(task_id):
+        await db.update_task(task_id, requires_approval=0)
+
+    return {"status": "approved", "task_id": task_id, "action": action}
+
+
+@app.post("/tasks/{task_id}/reject/{action}")
+async def reject_action_endpoint(
+    task_id: str,
+    action: str,
+    body: ApprovalDecisionRequest | None = None,
+    token: str = Depends(_require_auth),
+) -> dict:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    ok = await db.decide_approval_gate(
+        task_id, action,
+        decision=ApprovalStatus.rejected,
+        decided_by=token_fingerprint(token),
+        reason=body.reason if body else None,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending approval gate found")
+
+    return {"status": "rejected", "task_id": task_id, "action": action}
+
+
+# ── v0.2.0: Token management ─────────────────────────────────
+
+
+@app.post("/tokens", status_code=201)
+async def create_token_endpoint(
+    request: TokenCreateRequest, token: str = Depends(_require_auth)
+) -> dict:
+    # Only admin-scoped tokens can create new tokens
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+
+    from datetime import datetime, timedelta, timezone
+
+    raw_token = generate_token()
+    fp = token_fingerprint(raw_token)
+
+    expires_at = None
+    if request.expires_in_days:
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
+        ).isoformat()
+
+    token_info = await db.create_token(
+        name=request.name,
+        token_hash=fp,
+        scopes=request.scopes,
+        expires_at=expires_at,
+        created_by=auth.fingerprint,
+    )
+
+    return TokenCreateResponse(
+        id=token_info.id,
+        name=token_info.name,
+        token=raw_token,
+        scopes=token_info.scopes,
+        created_at=token_info.created_at,
+        expires_at=token_info.expires_at,
+    ).model_dump()
+
+
+@app.get("/tokens")
+async def list_tokens_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+    tokens = await db.list_tokens()
+    # Never return the token_hash in list responses
+    return [
+        {
+            "id": t.id, "name": t.name, "scopes": t.scopes,
+            "created_at": t.created_at, "expires_at": t.expires_at,
+            "revoked_at": t.revoked_at, "is_active": t.is_active(),
+        }
+        for t in tokens
+    ]
+
+
+@app.post("/tokens/{token_id}/revoke")
+async def revoke_token_endpoint(
+    token_id: int, token: str = Depends(_require_auth)
+) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:tokens")
+    ok = await db.revoke_token(token_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Token not found or already revoked")
+    return {"revoked": token_id}
+
+
+# ── v0.2.0: Policy presets ───────────────────────────────────
+
+
+@app.put("/policies/{name}")
+async def save_policy_endpoint(
+    name: str, config: dict, token: str = Depends(_require_auth)
+) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    if not re.match(r"^[a-z0-9_-]{1,64}$", name):
+        raise HTTPException(status_code=400, detail="Invalid preset name")
+    preset = await db.save_policy_preset(name, config)
+    return preset.model_dump()
+
+
+@app.get("/policies")
+async def list_policies_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    presets = await db.list_policy_presets()
+    return [p.model_dump() for p in presets]
+
+
+@app.get("/policies/{name}")
+async def get_policy_endpoint(name: str, token: str = Depends(_require_auth)) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    preset = await db.get_policy_preset(name)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return preset.model_dump()
+
+
+@app.delete("/policies/{name}")
+async def delete_policy_endpoint(
+    name: str, token: str = Depends(_require_auth)
+) -> dict:
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "admin:policies")
+    ok = await db.delete_policy_preset(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"deleted": name}
+
+
+# ── v0.2.0: Task secrets audit ───────────────────────────────
+
+
+@app.get("/tasks/{task_id}/secrets")
+async def get_task_secrets_endpoint(
+    task_id: str, token: str = Depends(_require_auth)
+) -> list[dict]:
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+    return await db.get_task_secrets(task_id)
 
 
 # ── WebSocket /tasks/{task_id}/stream ──────────────────────────
@@ -547,6 +784,7 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
                 TaskStatus.completed,
                 TaskStatus.failed,
                 TaskStatus.cancelled,
+                TaskStatus.pending_approval,
             ):
                 await ws.send_json(
                     {

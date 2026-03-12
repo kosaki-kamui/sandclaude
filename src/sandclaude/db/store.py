@@ -13,7 +13,15 @@ from pathlib import Path
 import aiosqlite
 
 from sandclaude.config import settings
-from sandclaude.models import Task, TaskPriority, TaskStatus
+from sandclaude.models import (
+    ApprovalGate,
+    ApprovalStatus,
+    PolicyPreset,
+    Task,
+    TaskPriority,
+    TaskStatus,
+    TokenInfo,
+)
 
 # F2: DB_PATH as a function so it always reflects current settings.data_dir.
 # Can be overridden in tests by setting DB_PATH directly.
@@ -69,10 +77,67 @@ async def init_db() -> None:
             "allowed_domains": "TEXT",
             "notify_webhook": "TEXT",
             "notify_on": "TEXT",
+            # v0.2.0 columns
+            "policy_preset": "TEXT",
+            "requires_approval": "INTEGER NOT NULL DEFAULT 0",
+            "declared_secrets": "TEXT",
+            "cost_budget_usd": "REAL",
         }
         for col_name, col_type in migrations.items():
             if col_name not in cols:
                 await db.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}")
+
+        # v0.2.0: Approval gates table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS approval_gates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                decided_by TEXT,
+                decided_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(task_id, action)
+            )
+        """)
+
+        # v0.2.0: Token registry
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                scopes TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked_at TEXT,
+                created_by TEXT
+            )
+        """)
+
+        # v0.2.0: Policy presets
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS policy_presets (
+                name TEXT PRIMARY KEY,
+                config TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            )
+        """)
+
+        # v0.2.0: Task secrets audit
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                secret_name TEXT NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'setup',
+                granted INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(task_id, secret_name)
+            )
+        """)
+
         await db.commit()
 
 
@@ -90,16 +155,21 @@ async def create_task(
     allowed_domains: list[str] | None = None,
     notify_webhook: str | None = None,
     notify_on: list[str] | None = None,
+    policy_preset: str | None = None,
+    declared_secrets: list[str] | None = None,
+    cost_budget_usd: float | None = None,
 ) -> Task:
     now = datetime.now(timezone.utc).isoformat()
     allowed_domains_json = json.dumps(allowed_domains) if allowed_domains else None
     notify_on_json = json.dumps(notify_on) if notify_on else None
+    declared_secrets_json = json.dumps(declared_secrets) if declared_secrets else None
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """INSERT INTO tasks
                (id, status, repo, branch, prompt, model, max_turns, priority,
-                owner_token_hash, host_cwd, allowed_domains, notify_webhook, notify_on, created_at)
-               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                owner_token_hash, host_cwd, allowed_domains, notify_webhook, notify_on,
+                policy_preset, declared_secrets, cost_budget_usd, created_at)
+               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 repo,
@@ -113,6 +183,9 @@ async def create_task(
                 allowed_domains_json,
                 notify_webhook,
                 notify_on_json,
+                policy_preset,
+                declared_secrets_json,
+                cost_budget_usd,
                 now,
             ),
         )
@@ -176,6 +249,7 @@ async def update_task(
     tokens_output: int | None = None,
     total_cost_usd: float | None = None,
     error: str | None = None,
+    requires_approval: int | None = None,
 ) -> None:
     sets: list[str] = []
     vals: list[object] = []
@@ -204,6 +278,9 @@ async def update_task(
     if error is not None:
         sets.append("error = ?")
         vals.append(error)
+    if requires_approval is not None:
+        sets.append("requires_approval = ?")
+        vals.append(requires_approval)
 
     if not sets:
         return
@@ -331,6 +408,7 @@ async def cleanup_old_tasks(retention_days: int) -> int:
 
 
 def _row_to_task(row: aiosqlite.Row) -> Task:
+    keys = row.keys() if hasattr(row, "keys") else []
     return Task(
         id=row["id"],
         status=TaskStatus(row["status"]),
@@ -353,4 +431,221 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         tokens_output=row["tokens_output"],
         total_cost_usd=row["total_cost_usd"],
         error=row["error"],
+        # v0.2.0 fields (default for migrated DBs missing these columns)
+        policy_preset=row["policy_preset"] if "policy_preset" in keys else None,
+        requires_approval=row["requires_approval"] if "requires_approval" in keys else 0,
+        declared_secrets=row["declared_secrets"] if "declared_secrets" in keys else None,
+        cost_budget_usd=row["cost_budget_usd"] if "cost_budget_usd" in keys else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Approval gates CRUD
+# ---------------------------------------------------------------------------
+
+
+async def create_approval_gate(task_id: str, action: str) -> ApprovalGate:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            "INSERT INTO approval_gates (task_id, action, status, created_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (task_id, action, now),
+        )
+        await db.commit()
+        gate_id = cursor.lastrowid
+    return ApprovalGate(
+        id=gate_id or 0, task_id=task_id, action=action,
+        status=ApprovalStatus.pending, created_at=now,
+    )
+
+
+async def get_approval_gates(task_id: str) -> list[ApprovalGate]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM approval_gates WHERE task_id = ? ORDER BY created_at", (task_id,)
+        )
+        rows = await cursor.fetchall()
+    return [
+        ApprovalGate(
+            id=r["id"], task_id=r["task_id"], action=r["action"],
+            status=ApprovalStatus(r["status"]), reason=r["reason"],
+            decided_by=r["decided_by"], decided_at=r["decided_at"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+async def decide_approval_gate(
+    task_id: str, action: str, *, decision: ApprovalStatus,
+    decided_by: str, reason: str | None = None,
+) -> bool:
+    """Approve or reject a gate. Returns True if a pending gate was found and updated."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            "UPDATE approval_gates SET status = ?, reason = ?, decided_by = ?, decided_at = ? "
+            "WHERE task_id = ? AND action = ? AND status = 'pending'",
+            (decision.value, reason, decided_by, now, task_id, action),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def has_pending_gates(task_id: str) -> bool:
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM approval_gates WHERE task_id = ? AND status = 'pending'",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        return (row[0] if row else 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Token registry CRUD
+# ---------------------------------------------------------------------------
+
+
+async def create_token(
+    *, name: str, token_hash: str, scopes: list[str],
+    expires_at: str | None = None, created_by: str | None = None,
+) -> TokenInfo:
+    now = datetime.now(timezone.utc).isoformat()
+    scopes_json = json.dumps(scopes)
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            "INSERT INTO tokens (name, token_hash, scopes, created_at, expires_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, token_hash, scopes_json, now, expires_at, created_by),
+        )
+        await db.commit()
+        token_id = cursor.lastrowid
+    return TokenInfo(
+        id=token_id or 0, name=name, token_hash=token_hash,
+        scopes=scopes, created_at=now, expires_at=expires_at,
+        created_by=created_by,
+    )
+
+
+async def get_token_by_hash(token_hash: str) -> TokenInfo | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM tokens WHERE token_hash = ?", (token_hash,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+    return _row_to_token(row)
+
+
+async def list_tokens() -> list[TokenInfo]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM tokens ORDER BY created_at DESC")
+        rows = await cursor.fetchall()
+    return [_row_to_token(r) for r in rows]
+
+
+async def revoke_token(token_id: int) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute(
+            "UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (now, token_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+def _row_to_token(row: aiosqlite.Row) -> TokenInfo:
+    scopes = json.loads(row["scopes"]) if row["scopes"] else []
+    return TokenInfo(
+        id=row["id"], name=row["name"], token_hash=row["token_hash"],
+        scopes=scopes, created_at=row["created_at"],
+        expires_at=row["expires_at"], revoked_at=row["revoked_at"],
+        created_by=row["created_by"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Policy presets CRUD
+# ---------------------------------------------------------------------------
+
+
+async def save_policy_preset(name: str, config: dict) -> PolicyPreset:
+    now = datetime.now(timezone.utc).isoformat()
+    config_json = json.dumps(config)
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            "INSERT INTO policy_presets (name, config, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET config = excluded.config, "
+            "updated_at = excluded.updated_at",
+            (name, config_json, now, now),
+        )
+        await db.commit()
+    return PolicyPreset(name=name, config=config, created_at=now, updated_at=now)
+
+
+async def get_policy_preset(name: str) -> PolicyPreset | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM policy_presets WHERE name = ?", (name,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+    return PolicyPreset(
+        name=row["name"], config=json.loads(row["config"]),
+        created_at=row["created_at"], updated_at=row["updated_at"],
+    )
+
+
+async def list_policy_presets() -> list[PolicyPreset]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM policy_presets ORDER BY name")
+        rows = await cursor.fetchall()
+    return [
+        PolicyPreset(
+            name=r["name"], config=json.loads(r["config"]),
+            created_at=r["created_at"], updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+
+
+async def delete_policy_preset(name: str) -> bool:
+    async with aiosqlite.connect(_db_path()) as db:
+        cursor = await db.execute("DELETE FROM policy_presets WHERE name = ?", (name,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0: Task secrets audit CRUD
+# ---------------------------------------------------------------------------
+
+
+async def record_task_secret(task_id: str, secret_name: str, phase: str, granted: bool) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO task_secrets (task_id, secret_name, phase, granted) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, secret_name, phase, 1 if granted else 0),
+        )
+        await db.commit()
+
+
+async def get_task_secrets(task_id: str) -> list[dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM task_secrets WHERE task_id = ? ORDER BY secret_name", (task_id,)
+        )
+        rows = await cursor.fetchall()
+    return [
+        {"secret_name": r["secret_name"], "phase": r["phase"], "granted": bool(r["granted"])}
+        for r in rows
+    ]

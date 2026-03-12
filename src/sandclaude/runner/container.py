@@ -68,7 +68,15 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
     try:
         addrs = socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise RuntimeError(f"DNS resolution failed for allowed domain {domain}: {exc}")
+        logger.warning(
+            "DNS resolution failed for %s: %s — "
+            "this domain will not be reachable in the agent phase",
+            domain, exc,
+        )
+        raise RuntimeError(
+            f"DNS resolution failed for allowed domain {domain}: {exc}. "
+            f"The agent will not be able to reach this domain."
+        )
 
     ipv4s: list[str] = []
     for family, _, _, _, sockaddr in addrs:
@@ -88,15 +96,36 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
             or ip.is_reserved
             or ip.is_unspecified
         ):
+            ip_class = (
+                "private" if ip.is_private
+                else "loopback" if ip.is_loopback
+                else "link-local" if ip.is_link_local
+                else "reserved"
+            )
+            logger.warning(
+                "Allowed domain %s resolves to %s IP %s — "
+                "blocked to prevent egress to internal services",
+                domain, ip_class, ip_str,
+            )
             raise RuntimeError(
-                f"Allowed domain {domain} resolves to private/reserved IP {ip_str}. "
-                f"This is blocked to prevent egress to internal services."
+                f"Allowed domain {domain} resolves to {ip_class} IP {ip_str}. "
+                f"This is blocked to prevent egress to internal services. "
+                f"Ensure {domain} resolves to a public IP."
             )
         if ip_str not in ipv4s:
             ipv4s.append(ip_str)
 
     if not ipv4s:
-        logger.warning("No IPv4 addresses resolved for %s", domain)
+        logger.warning(
+            "No IPv4 addresses resolved for %s — "
+            "this domain may not be reachable if it only has IPv6 records",
+            domain,
+        )
+    else:
+        logger.info(
+            "Resolved %s to %d IP(s): %s",
+            domain, len(ipv4s), ", ".join(ipv4s),
+        )
     return ipv4s
 
 
@@ -209,6 +238,55 @@ def _host_path_for(container_path: Path) -> str:
     return resolved
 
 
+async def _inject_task_secrets(task: Task, env: dict[str, str]) -> None:
+    """Resolve declared secrets against policy and inject into container env.
+
+    Secrets are declared in the task request, resolved against the policy preset,
+    and injected as environment variables prefixed with SECRET_.
+    Audit records are written for each secret (granted or denied).
+    """
+    import json as _json
+    import os
+
+    from sandclaude.db import store as _db
+    from sandclaude.policy import check_secret_allowed, resolve_effective_policy
+
+    if not task.declared_secrets:
+        return
+
+    try:
+        secret_names = _json.loads(task.declared_secrets)
+    except (ValueError, TypeError):
+        return
+
+    if not isinstance(secret_names, list):
+        return
+
+    policy = await resolve_effective_policy(task)
+
+    for name in secret_names:
+        if not isinstance(name, str) or not name:
+            continue
+        # Check policy allows this secret
+        allowed = check_secret_allowed(policy, name)
+        # Check server has the secret configured
+        env_key = f"SECRET_{name}"
+        value = os.environ.get(env_key, "")
+        granted = allowed and bool(value)
+
+        # Record in audit (name only, never value)
+        await _db.record_task_secret(task.id, name, "setup", granted)
+
+        if granted:
+            env[name] = value
+            logger.info("Secret %s granted for task %s", name, task.id)
+        else:
+            reason = "not in policy" if not allowed else "not configured"
+            logger.info(
+                "Secret %s denied for task %s (%s)", name, task.id, reason,
+            )
+
+
 async def run_task_in_container(task: Task) -> dict:
     """Full container lifecycle for a task. Returns result dict."""
     client = _get_client()
@@ -232,6 +310,9 @@ async def run_task_in_container(task: Task) -> dict:
     # Pass git token for private repo cloning (setup phase only — scrubbed before agent phase)
     if settings.git_token:
         env["GIT_TOKEN"] = settings.git_token
+
+    # v0.2.0: Inject declared secrets per policy
+    await _inject_task_secrets(task, env)
 
     if task.repo == "." or task.repo.startswith("/"):
         env["LOCAL_REPO"] = "true"
