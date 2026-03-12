@@ -64,9 +64,13 @@ class TestRiskFileClassification:
         assert summary.lockfiles_modified is True
 
     def test_mixed_categories(self):
-        diff = self._make_diff([
-            "src/auth.py", "tests/test_auth.py", "README.md",
-        ])
+        diff = self._make_diff(
+            [
+                "src/auth.py",
+                "tests/test_auth.py",
+                "README.md",
+            ]
+        )
         summary = generate_risk_summary(diff, {})
         assert len(summary.categories) == 3
 
@@ -150,8 +154,11 @@ class TestRiskAuditAnalysis:
     def test_cost_tracking(self):
         diff = "diff --git a/x b/x\n"
         summary = generate_risk_summary(
-            diff, {},
-            tokens_input=5000, tokens_output=1500, cost_usd=0.05,
+            diff,
+            {},
+            tokens_input=5000,
+            tokens_output=1500,
+            cost_usd=0.05,
         )
         assert summary.tokens_input == 5000
         assert summary.cost_usd == 0.05

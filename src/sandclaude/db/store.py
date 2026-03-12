@@ -455,8 +455,11 @@ async def create_approval_gate(task_id: str, action: str) -> ApprovalGate:
         await db.commit()
         gate_id = cursor.lastrowid
     return ApprovalGate(
-        id=gate_id or 0, task_id=task_id, action=action,
-        status=ApprovalStatus.pending, created_at=now,
+        id=gate_id or 0,
+        task_id=task_id,
+        action=action,
+        status=ApprovalStatus.pending,
+        created_at=now,
     )
 
 
@@ -469,9 +472,13 @@ async def get_approval_gates(task_id: str) -> list[ApprovalGate]:
         rows = await cursor.fetchall()
     return [
         ApprovalGate(
-            id=r["id"], task_id=r["task_id"], action=r["action"],
-            status=ApprovalStatus(r["status"]), reason=r["reason"],
-            decided_by=r["decided_by"], decided_at=r["decided_at"],
+            id=r["id"],
+            task_id=r["task_id"],
+            action=r["action"],
+            status=ApprovalStatus(r["status"]),
+            reason=r["reason"],
+            decided_by=r["decided_by"],
+            decided_at=r["decided_at"],
             created_at=r["created_at"],
         )
         for r in rows
@@ -479,8 +486,12 @@ async def get_approval_gates(task_id: str) -> list[ApprovalGate]:
 
 
 async def decide_approval_gate(
-    task_id: str, action: str, *, decision: ApprovalStatus,
-    decided_by: str, reason: str | None = None,
+    task_id: str,
+    action: str,
+    *,
+    decision: ApprovalStatus,
+    decided_by: str,
+    reason: str | None = None,
 ) -> bool:
     """Approve or reject a gate. Returns True if a pending gate was found and updated."""
     now = datetime.now(timezone.utc).isoformat()
@@ -510,8 +521,12 @@ async def has_pending_gates(task_id: str) -> bool:
 
 
 async def create_token(
-    *, name: str, token_hash: str, scopes: list[str],
-    expires_at: str | None = None, created_by: str | None = None,
+    *,
+    name: str,
+    token_hash: str,
+    scopes: list[str],
+    expires_at: str | None = None,
+    created_by: str | None = None,
 ) -> TokenInfo:
     now = datetime.now(timezone.utc).isoformat()
     scopes_json = json.dumps(scopes)
@@ -524,8 +539,12 @@ async def create_token(
         await db.commit()
         token_id = cursor.lastrowid
     return TokenInfo(
-        id=token_id or 0, name=name, token_hash=token_hash,
-        scopes=scopes, created_at=now, expires_at=expires_at,
+        id=token_id or 0,
+        name=name,
+        token_hash=token_hash,
+        scopes=scopes,
+        created_at=now,
+        expires_at=expires_at,
         created_by=created_by,
     )
 
@@ -562,9 +581,13 @@ async def revoke_token(token_id: int) -> bool:
 def _row_to_token(row: aiosqlite.Row) -> TokenInfo:
     scopes = json.loads(row["scopes"]) if row["scopes"] else []
     return TokenInfo(
-        id=row["id"], name=row["name"], token_hash=row["token_hash"],
-        scopes=scopes, created_at=row["created_at"],
-        expires_at=row["expires_at"], revoked_at=row["revoked_at"],
+        id=row["id"],
+        name=row["name"],
+        token_hash=row["token_hash"],
+        scopes=scopes,
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        revoked_at=row["revoked_at"],
         created_by=row["created_by"],
     )
 
@@ -597,8 +620,10 @@ async def get_policy_preset(name: str) -> PolicyPreset | None:
         if not row:
             return None
     return PolicyPreset(
-        name=row["name"], config=json.loads(row["config"]),
-        created_at=row["created_at"], updated_at=row["updated_at"],
+        name=row["name"],
+        config=json.loads(row["config"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -609,8 +634,10 @@ async def list_policy_presets() -> list[PolicyPreset]:
         rows = await cursor.fetchall()
     return [
         PolicyPreset(
-            name=r["name"], config=json.loads(r["config"]),
-            created_at=r["created_at"], updated_at=r["updated_at"],
+            name=r["name"],
+            config=json.loads(r["config"]),
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
         )
         for r in rows
     ]

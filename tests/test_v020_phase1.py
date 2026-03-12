@@ -85,7 +85,9 @@ class TestApprovalGates:
     async def test_create_and_list_gates(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate1", repo=".", prompt="test",
+            task_id="task-gate1",
+            repo=".",
+            prompt="test",
         )
         gate = await db.create_approval_gate(task.id, "create_pr")
         assert gate.action == "create_pr"
@@ -99,12 +101,15 @@ class TestApprovalGates:
     async def test_approve_gate(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate2", repo=".", prompt="test",
+            task_id="task-gate2",
+            repo=".",
+            prompt="test",
         )
         await db.create_approval_gate(task.id, "create_pr")
 
         ok = await db.decide_approval_gate(
-            task.id, "create_pr",
+            task.id,
+            "create_pr",
             decision=ApprovalStatus.approved,
             decided_by="fp_abc123",
             reason="Looks good",
@@ -120,12 +125,15 @@ class TestApprovalGates:
     async def test_reject_gate(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate3", repo=".", prompt="test",
+            task_id="task-gate3",
+            repo=".",
+            prompt="test",
         )
         await db.create_approval_gate(task.id, "create_pr")
 
         ok = await db.decide_approval_gate(
-            task.id, "create_pr",
+            task.id,
+            "create_pr",
             decision=ApprovalStatus.rejected,
             decided_by="fp_abc456",
             reason="Too risky",
@@ -139,17 +147,23 @@ class TestApprovalGates:
     async def test_cannot_decide_already_decided(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate4", repo=".", prompt="test",
+            task_id="task-gate4",
+            repo=".",
+            prompt="test",
         )
         await db.create_approval_gate(task.id, "create_pr")
         await db.decide_approval_gate(
-            task.id, "create_pr",
-            decision=ApprovalStatus.approved, decided_by="fp1",
+            task.id,
+            "create_pr",
+            decision=ApprovalStatus.approved,
+            decided_by="fp1",
         )
         # Second decision should fail
         ok = await db.decide_approval_gate(
-            task.id, "create_pr",
-            decision=ApprovalStatus.rejected, decided_by="fp2",
+            task.id,
+            "create_pr",
+            decision=ApprovalStatus.rejected,
+            decided_by="fp2",
         )
         assert ok is False
 
@@ -157,7 +171,9 @@ class TestApprovalGates:
     async def test_has_pending_gates(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate5", repo=".", prompt="test",
+            task_id="task-gate5",
+            repo=".",
+            prompt="test",
         )
         await db.create_approval_gate(task.id, "create_pr")
         await db.create_approval_gate(task.id, "push")
@@ -165,15 +181,19 @@ class TestApprovalGates:
         assert await db.has_pending_gates(task.id) is True
 
         await db.decide_approval_gate(
-            task.id, "create_pr",
-            decision=ApprovalStatus.approved, decided_by="fp1",
+            task.id,
+            "create_pr",
+            decision=ApprovalStatus.approved,
+            decided_by="fp1",
         )
         # Still has pending (push)
         assert await db.has_pending_gates(task.id) is True
 
         await db.decide_approval_gate(
-            task.id, "push",
-            decision=ApprovalStatus.approved, decided_by="fp1",
+            task.id,
+            "push",
+            decision=ApprovalStatus.approved,
+            decided_by="fp1",
         )
         assert await db.has_pending_gates(task.id) is False
 
@@ -181,7 +201,9 @@ class TestApprovalGates:
     async def test_requires_approval_flag(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-gate6", repo=".", prompt="test",
+            task_id="task-gate6",
+            repo=".",
+            prompt="test",
         )
         await db.update_task(task.id, requires_approval=1)
         updated = await db.get_task(task.id)
@@ -223,7 +245,8 @@ class TestTokenRegistry:
     async def test_revoke_token(self):
         await db.init_db()
         token = await db.create_token(
-            name="temp-token", token_hash="revoke_test",
+            name="temp-token",
+            token_hash="revoke_test",
             scopes=["tasks:read"],
         )
         assert token.revoked_at is None
@@ -239,7 +262,8 @@ class TestTokenRegistry:
     async def test_revoke_already_revoked(self):
         await db.init_db()
         token = await db.create_token(
-            name="double-revoke", token_hash="double_rev",
+            name="double-revoke",
+            token_hash="double_rev",
             scopes=["tasks:read"],
         )
         await db.revoke_token(token.id)
@@ -250,10 +274,14 @@ class TestTokenRegistry:
     async def test_list_tokens(self):
         await db.init_db()
         await db.create_token(
-            name="t1", token_hash="list_hash1", scopes=["tasks:read"],
+            name="t1",
+            token_hash="list_hash1",
+            scopes=["tasks:read"],
         )
         await db.create_token(
-            name="t2", token_hash="list_hash2", scopes=["tasks:create"],
+            name="t2",
+            token_hash="list_hash2",
+            scopes=["tasks:create"],
         )
         tokens = await db.list_tokens()
         names = {t.name for t in tokens}
@@ -262,7 +290,8 @@ class TestTokenRegistry:
 
     def test_token_info_has_scope(self):
         info = TokenInfo(
-            name="test", token_hash="x",
+            name="test",
+            token_hash="x",
             scopes=["tasks:create", "tasks:read"],
         )
         assert info.has_scope("tasks:create") is True
@@ -274,14 +303,18 @@ class TestTokenRegistry:
 
     def test_token_info_is_active_expired(self):
         info = TokenInfo(
-            name="test", token_hash="x", scopes=[],
+            name="test",
+            token_hash="x",
+            scopes=[],
             expires_at="2020-01-01T00:00:00+00:00",
         )
         assert info.is_active() is False
 
     def test_token_info_is_active_revoked(self):
         info = TokenInfo(
-            name="test", token_hash="x", scopes=[],
+            name="test",
+            token_hash="x",
+            scopes=[],
             revoked_at="2025-01-01T00:00:00+00:00",
         )
         assert info.is_active() is False
@@ -412,7 +445,9 @@ class TestTaskSecretsAudit:
     async def test_record_and_retrieve_secrets(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-sec1", repo=".", prompt="test",
+            task_id="task-sec1",
+            repo=".",
+            prompt="test",
         )
         await db.record_task_secret(task.id, "NPM_TOKEN", "setup", True)
         await db.record_task_secret(task.id, "DB_URL", "setup", False)
@@ -461,7 +496,8 @@ class TestAuthScopes:
         raw = generate_token()
         fp = token_fingerprint(raw)
         await db.create_token(
-            name="test-scoped", token_hash=fp,
+            name="test-scoped",
+            token_hash=fp,
             scopes=["tasks:create", "tasks:read"],
         )
 
@@ -488,7 +524,9 @@ class TestAuthScopes:
         raw = generate_token()
         fp = token_fingerprint(raw)
         token_info = await db.create_token(
-            name="revokable", token_hash=fp, scopes=["tasks:read"],
+            name="revokable",
+            token_hash=fp,
+            scopes=["tasks:read"],
         )
         await db.revoke_token(token_info.id)
 
@@ -504,7 +542,9 @@ class TestAuthScopes:
         from sandclaude.auth import AuthResult, require_scope
 
         auth = AuthResult(
-            token="x", fingerprint="fp", is_legacy=False,
+            token="x",
+            fingerprint="fp",
+            is_legacy=False,
             scopes=["tasks:read"],
         )
         # Should not raise

@@ -71,7 +71,8 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
         logger.warning(
             "DNS resolution failed for %s: %s — "
             "this domain will not be reachable in the agent phase",
-            domain, exc,
+            domain,
+            exc,
         )
         raise RuntimeError(
             f"DNS resolution failed for allowed domain {domain}: {exc}. "
@@ -97,15 +98,20 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
             or ip.is_unspecified
         ):
             ip_class = (
-                "private" if ip.is_private
-                else "loopback" if ip.is_loopback
-                else "link-local" if ip.is_link_local
+                "private"
+                if ip.is_private
+                else "loopback"
+                if ip.is_loopback
+                else "link-local"
+                if ip.is_link_local
                 else "reserved"
             )
             logger.warning(
                 "Allowed domain %s resolves to %s IP %s — "
                 "blocked to prevent egress to internal services",
-                domain, ip_class, ip_str,
+                domain,
+                ip_class,
+                ip_str,
             )
             raise RuntimeError(
                 f"Allowed domain {domain} resolves to {ip_class} IP {ip_str}. "
@@ -124,7 +130,9 @@ def _resolve_and_validate_domain(domain: str) -> list[str]:
     else:
         logger.info(
             "Resolved %s to %d IP(s): %s",
-            domain, len(ipv4s), ", ".join(ipv4s),
+            domain,
+            len(ipv4s),
+            ", ".join(ipv4s),
         )
     return ipv4s
 
@@ -283,7 +291,10 @@ async def _inject_task_secrets(task: Task, env: dict[str, str]) -> None:
         else:
             reason = "not in policy" if not allowed else "not configured"
             logger.info(
-                "Secret %s denied for task %s (%s)", name, task.id, reason,
+                "Secret %s denied for task %s (%s)",
+                name,
+                task.id,
+                reason,
             )
 
 
@@ -443,12 +454,13 @@ async def run_task_in_container(task: Task) -> dict:
             ):
                 status = TaskStatus.failed
                 error_str = (
-                    f"Cost budget exceeded: ${cost:.4f} > "
-                    f"${task.cost_budget_usd:.4f} budget"
+                    f"Cost budget exceeded: ${cost:.4f} > ${task.cost_budget_usd:.4f} budget"
                 )
                 logger.warning(
                     "Task %s exceeded cost budget (%.4f > %.4f)",
-                    task.id, cost, task.cost_budget_usd,
+                    task.id,
+                    cost,
+                    task.cost_budget_usd,
                 )
 
             await db.update_task(

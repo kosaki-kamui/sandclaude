@@ -15,30 +15,71 @@ from dataclasses import dataclass, field
 _CATEGORY_PATTERNS: list[tuple[str, list[str]]] = [
     ("tests", [r"test[s_]", r"spec[s_]", r"__tests__", r"\.test\.", r"\.spec\."]),
     ("ci", [r"\.github/workflows", r"\.gitlab-ci", r"Jenkinsfile", r"\.circleci"]),
-    ("config", [
-        r"\.env", r"\.yml$", r"\.yaml$", r"\.toml$", r"\.ini$", r"\.cfg$",
-        r"Makefile", r"Dockerfile", r"docker-compose", r"\.dockerignore",
-    ]),
+    (
+        "config",
+        [
+            r"\.env",
+            r"\.yml$",
+            r"\.yaml$",
+            r"\.toml$",
+            r"\.ini$",
+            r"\.cfg$",
+            r"Makefile",
+            r"Dockerfile",
+            r"docker-compose",
+            r"\.dockerignore",
+        ],
+    ),
     ("docs", [r"\.md$", r"\.rst$", r"\.txt$", r"docs/", r"README", r"CHANGELOG"]),
-    ("dependencies", [
-        r"package\.json$", r"package-lock\.json$", r"yarn\.lock$", r"pnpm-lock",
-        r"requirements.*\.txt$", r"Pipfile", r"poetry\.lock", r"pyproject\.toml$",
-        r"Cargo\.toml$", r"Cargo\.lock$", r"go\.mod$", r"go\.sum$",
-        r"Gemfile", r"Gemfile\.lock",
-    ]),
+    (
+        "dependencies",
+        [
+            r"package\.json$",
+            r"package-lock\.json$",
+            r"yarn\.lock$",
+            r"pnpm-lock",
+            r"requirements.*\.txt$",
+            r"Pipfile",
+            r"poetry\.lock",
+            r"pyproject\.toml$",
+            r"Cargo\.toml$",
+            r"Cargo\.lock$",
+            r"go\.mod$",
+            r"go\.sum$",
+            r"Gemfile",
+            r"Gemfile\.lock",
+        ],
+    ),
 ]
 
 _SENSITIVE_PATTERNS: list[str] = [
-    r"\.env", r"secret", r"credential", r"password", r"token",
-    r"\.pem$", r"\.key$", r"\.cert$", r"\.crt$",
-    r"auth", r"permission", r"rbac", r"policy",
-    r"migration", r"schema",
+    r"\.env",
+    r"secret",
+    r"credential",
+    r"password",
+    r"token",
+    r"\.pem$",
+    r"\.key$",
+    r"\.cert$",
+    r"\.crt$",
+    r"auth",
+    r"permission",
+    r"rbac",
+    r"policy",
+    r"migration",
+    r"schema",
 ]
 
 _LOCKFILE_PATTERNS: list[str] = [
-    r"package-lock\.json$", r"yarn\.lock$", r"pnpm-lock\.yaml$",
-    r"poetry\.lock$", r"Pipfile\.lock$", r"Cargo\.lock$",
-    r"go\.sum$", r"Gemfile\.lock$", r"composer\.lock$",
+    r"package-lock\.json$",
+    r"yarn\.lock$",
+    r"pnpm-lock\.yaml$",
+    r"poetry\.lock$",
+    r"Pipfile\.lock$",
+    r"Cargo\.lock$",
+    r"go\.sum$",
+    r"Gemfile\.lock$",
+    r"composer\.lock$",
 ]
 
 
@@ -110,9 +151,17 @@ def _is_dep_file(path: str) -> bool:
 
 def _is_test_command(cmd: str) -> bool:
     test_indicators = [
-        "pytest", "jest", "mocha", "vitest", "cargo test",
-        "go test", "npm test", "yarn test", "make test",
-        "rspec", "unittest",
+        "pytest",
+        "jest",
+        "mocha",
+        "vitest",
+        "cargo test",
+        "go test",
+        "npm test",
+        "yarn test",
+        "make test",
+        "rspec",
+        "unittest",
     ]
     cmd_lower = cmd.lower()
     return any(t in cmd_lower for t in test_indicators)
@@ -120,9 +169,16 @@ def _is_test_command(cmd: str) -> bool:
 
 def _is_install_command(cmd: str) -> bool:
     install_indicators = [
-        "pip install", "npm install", "yarn add", "cargo add",
-        "go get", "apt install", "apt-get install", "brew install",
-        "gem install", "composer require",
+        "pip install",
+        "npm install",
+        "yarn add",
+        "cargo add",
+        "go get",
+        "apt install",
+        "apt-get install",
+        "brew install",
+        "gem install",
+        "composer require",
     ]
     cmd_lower = cmd.lower()
     return any(t in cmd_lower for t in install_indicators)
@@ -173,9 +229,7 @@ def generate_risk_summary(
     # Network analysis
     net_reqs = audit.get("network_requests", [])
     summary.external_network_access = len(net_reqs) > 0
-    summary.blocked_network_requests = sum(
-        1 for r in net_reqs if not r.get("allowed")
-    )
+    summary.blocked_network_requests = sum(1 for r in net_reqs if not r.get("allowed"))
 
     # Determine attention files and risk level
     summary.attention_files = list(summary.sensitive_files)
@@ -189,21 +243,15 @@ def generate_risk_summary(
     # Risk level determination
     reasons: list[str] = []
     if summary.sensitive_files:
-        reasons.append(
-            f"Sensitive files modified: {', '.join(summary.sensitive_files[:5])}"
-        )
+        reasons.append(f"Sensitive files modified: {', '.join(summary.sensitive_files[:5])}")
     if summary.lockfiles_modified:
         reasons.append("Lockfiles modified — verify dependency changes")
     if summary.ci_files_changed:
         reasons.append("CI/CD configuration changed")
     if summary.blocked_network_requests > 0:
-        reasons.append(
-            f"{summary.blocked_network_requests} network request(s) were blocked"
-        )
+        reasons.append(f"{summary.blocked_network_requests} network request(s) were blocked")
     if summary.new_dependencies and not summary.lockfiles_modified:
-        reasons.append(
-            "Dependency files changed but no lockfile update — verify"
-        )
+        reasons.append("Dependency files changed but no lockfile update — verify")
     if not summary.test_commands and "code" in categories:
         reasons.append("Code changed but no tests were run")
 
@@ -296,20 +344,14 @@ def format_risk_summary_markdown(summary: RiskSummary) -> str:
         parts.append("### Network Activity")
         parts.append("")
         if summary.blocked_network_requests > 0:
-            parts.append(
-                f"- **{summary.blocked_network_requests} blocked** request(s)"
-            )
-        parts.append(
-            "- Network audit is best-effort (inferred from tool calls)"
-        )
+            parts.append(f"- **{summary.blocked_network_requests} blocked** request(s)")
+        parts.append("- Network audit is best-effort (inferred from tool calls)")
         parts.append("")
 
     # Cost
     parts.append("### Cost")
     parts.append("")
-    parts.append(
-        f"- Tokens: {summary.tokens_input:,} in / {summary.tokens_output:,} out"
-    )
+    parts.append(f"- Tokens: {summary.tokens_input:,} in / {summary.tokens_output:,} out")
     if summary.cost_usd > 0:
         parts.append(f"- Estimated: ${summary.cost_usd:.4f}")
     parts.append("")

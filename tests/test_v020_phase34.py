@@ -18,7 +18,9 @@ class TestCostBudget:
     async def test_task_stores_cost_budget(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-budget1", repo=".", prompt="test",
+            task_id="task-budget1",
+            repo=".",
+            prompt="test",
             cost_budget_usd=2.50,
         )
         assert task.cost_budget_usd == 2.50
@@ -27,7 +29,9 @@ class TestCostBudget:
     async def test_task_without_budget_has_none(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-budget2", repo=".", prompt="test",
+            task_id="task-budget2",
+            repo=".",
+            prompt="test",
         )
         assert task.cost_budget_usd is None
 
@@ -36,12 +40,16 @@ class TestCostBudget:
         """Retry should inherit cost_budget_usd from original task."""
         await db.init_db()
         task = await db.create_task(
-            task_id="task-budget3", repo=".", prompt="original",
+            task_id="task-budget3",
+            repo=".",
+            prompt="original",
             cost_budget_usd=5.0,
         )
         # Simulate retry by creating new task with same budget
         retry = await db.create_task(
-            task_id="task-budget3-retry", repo=task.repo, prompt="retry",
+            task_id="task-budget3-retry",
+            repo=task.repo,
+            prompt="retry",
             cost_budget_usd=task.cost_budget_usd,
         )
         assert retry.cost_budget_usd == 5.0
@@ -58,21 +66,15 @@ class TestRepoPolicy:
         assert check_repo_allowed(policy, "https://github.com/org/repo") is None
 
     def test_repo_allowed_exact_match(self):
-        policy = PolicyPresetConfig(
-            allowed_repos=["https://github.com/org/repo"]
-        )
+        policy = PolicyPresetConfig(allowed_repos=["https://github.com/org/repo"])
         assert check_repo_allowed(policy, "https://github.com/org/repo") is None
 
     def test_repo_allowed_prefix_match(self):
-        policy = PolicyPresetConfig(
-            allowed_repos=["https://github.com/org/"]
-        )
+        policy = PolicyPresetConfig(allowed_repos=["https://github.com/org/"])
         assert check_repo_allowed(policy, "https://github.com/org/repo.git") is None
 
     def test_repo_blocked(self):
-        policy = PolicyPresetConfig(
-            allowed_repos=["https://github.com/org/allowed"]
-        )
+        policy = PolicyPresetConfig(allowed_repos=["https://github.com/org/allowed"])
         result = check_repo_allowed(policy, "https://github.com/other/repo")
         assert result is not None
         assert "not in the allowed repos" in result
@@ -117,9 +119,12 @@ class TestRetry:
     async def test_retry_creates_new_task(self):
         await db.init_db()
         original = await db.create_task(
-            task_id="task-retry1", repo="https://github.com/org/repo",
-            prompt="Fix the bug", model="claude-sonnet-4-5",
-            max_turns=20, policy_preset="bugfix-pr",
+            task_id="task-retry1",
+            repo="https://github.com/org/repo",
+            prompt="Fix the bug",
+            model="claude-sonnet-4-5",
+            max_turns=20,
+            policy_preset="bugfix-pr",
         )
         # Mark as completed
         await db.update_task(original.id, status=TaskStatus.completed)
@@ -143,14 +148,18 @@ class TestRetry:
     async def test_retry_preserves_budget(self):
         await db.init_db()
         original = await db.create_task(
-            task_id="task-retry2", repo=".", prompt="test",
+            task_id="task-retry2",
+            repo=".",
+            prompt="test",
             cost_budget_usd=3.0,
         )
         await db.update_task(original.id, status=TaskStatus.completed)
 
         retry = await db.create_task(
-            task_id="task-retry2-followup", repo=original.repo,
-            prompt="follow-up", cost_budget_usd=original.cost_budget_usd,
+            task_id="task-retry2-followup",
+            repo=original.repo,
+            prompt="follow-up",
+            cost_budget_usd=original.cost_budget_usd,
         )
         assert retry.cost_budget_usd == 3.0
 
@@ -165,8 +174,11 @@ class TestTaskBundle:
     async def test_bundle_contains_task_data(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-bundle1", repo=".", prompt="bundle test",
-            policy_preset="bugfix-pr", cost_budget_usd=5.0,
+            task_id="task-bundle1",
+            repo=".",
+            prompt="bundle test",
+            policy_preset="bugfix-pr",
+            cost_budget_usd=5.0,
         )
         # Verify task fields are accessible for bundle export
         dump = task.safe_dump()
@@ -178,7 +190,9 @@ class TestTaskBundle:
     async def test_bundle_includes_gates_and_secrets(self):
         await db.init_db()
         task = await db.create_task(
-            task_id="task-bundle2", repo=".", prompt="bundle test",
+            task_id="task-bundle2",
+            repo=".",
+            prompt="bundle test",
         )
         # Create a gate and secret record
         await db.create_approval_gate(task.id, "create_pr")
@@ -211,8 +225,10 @@ class TestAskpassShellSafety:
             with _GitCredentialHelper() as env:
                 content = open(env["GIT_ASKPASS"]).read()
                 # The token must be shell-quoted, not raw-embedded
-                assert "$(whoami)" not in content.split("echo ")[1].split("'")[0] or \
-                    content.count("'") >= 2  # shlex.quote wraps in single quotes
+                assert (
+                    "$(whoami)" not in content.split("echo ")[1].split("'")[0]
+                    or content.count("'") >= 2
+                )  # shlex.quote wraps in single quotes
                 # Verify the script would echo the literal token, not expand it
                 assert "#!/bin/sh" in content
         finally:

@@ -522,9 +522,7 @@ async def create_pr_endpoint(
 
 
 @app.get("/tasks/{task_id}/approvals")
-async def list_approvals_endpoint(
-    task_id: str, token: str = Depends(_require_auth)
-) -> list[dict]:
+async def list_approvals_endpoint(task_id: str, token: str = Depends(_require_auth)) -> list[dict]:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -548,7 +546,8 @@ async def approve_action_endpoint(
     _require_task_owner(task.owner_token_hash, token)
 
     ok = await db.decide_approval_gate(
-        task_id, action,
+        task_id,
+        action,
         decision=ApprovalStatus.approved,
         decided_by=token_fingerprint(token),
         reason=body.reason if body else None,
@@ -577,7 +576,8 @@ async def reject_action_endpoint(
     _require_task_owner(task.owner_token_hash, token)
 
     ok = await db.decide_approval_gate(
-        task_id, action,
+        task_id,
+        action,
         decision=ApprovalStatus.rejected,
         decided_by=token_fingerprint(token),
         reason=body.reason if body else None,
@@ -592,9 +592,7 @@ async def reject_action_endpoint(
 
 
 @app.get("/approve/{task_id}/{action}")
-async def approval_ui_page(
-    task_id: str, action: str, token: str = ""
-) -> HTMLResponse:
+async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLResponse:
     """Server-rendered approval page. Linked from Slack/webhook notifications.
 
     The token is passed as a query parameter for one-click access from
@@ -747,18 +745,20 @@ async def list_tokens_endpoint(token: str = Depends(_require_auth)) -> list[dict
     # Never return the token_hash in list responses
     return [
         {
-            "id": t.id, "name": t.name, "scopes": t.scopes,
-            "created_at": t.created_at, "expires_at": t.expires_at,
-            "revoked_at": t.revoked_at, "is_active": t.is_active(),
+            "id": t.id,
+            "name": t.name,
+            "scopes": t.scopes,
+            "created_at": t.created_at,
+            "expires_at": t.expires_at,
+            "revoked_at": t.revoked_at,
+            "is_active": t.is_active(),
         }
         for t in tokens
     ]
 
 
 @app.post("/tokens/{token_id}/revoke")
-async def revoke_token_endpoint(
-    token_id: int, token: str = Depends(_require_auth)
-) -> dict:
+async def revoke_token_endpoint(token_id: int, token: str = Depends(_require_auth)) -> dict:
     auth = await verify_token_with_scopes(token)
     require_scope(auth, "admin:tokens")
     ok = await db.revoke_token(token_id)
@@ -801,9 +801,7 @@ async def get_policy_endpoint(name: str, token: str = Depends(_require_auth)) ->
 
 
 @app.delete("/policies/{name}")
-async def delete_policy_endpoint(
-    name: str, token: str = Depends(_require_auth)
-) -> dict:
+async def delete_policy_endpoint(name: str, token: str = Depends(_require_auth)) -> dict:
     auth = await verify_token_with_scopes(token)
     require_scope(auth, "admin:policies")
     ok = await db.delete_policy_preset(name)
@@ -816,9 +814,7 @@ async def delete_policy_endpoint(
 
 
 @app.get("/tasks/{task_id}/risk")
-async def get_risk_summary_endpoint(
-    task_id: str, token: str = Depends(_require_auth)
-) -> dict:
+async def get_risk_summary_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
     """Get a structured risk assessment for a completed task."""
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
@@ -840,14 +836,17 @@ async def get_risk_summary_endpoint(
         raise HTTPException(status_code=404, detail="Diff not available")
 
     diff = await _read_file_async(diff_path)
-    audit: dict = {}
+    audit_data: dict = {}
     if audit_path.exists():
-        audit = await _read_json_async(audit_path)
+        raw = await _read_json_async(audit_path)
+        if isinstance(raw, dict):
+            audit_data = raw
 
     from sandclaude.risk import generate_risk_summary
 
     summary = generate_risk_summary(
-        diff, audit,
+        diff,
+        audit_data,
         tokens_input=task.tokens_input or 0,
         tokens_output=task.tokens_output or 0,
         cost_usd=task.total_cost_usd or 0.0,
@@ -862,9 +861,7 @@ async def get_risk_summary_endpoint(
 
 
 @app.post("/tasks/{task_id}/review")
-async def review_task_endpoint(
-    task_id: str, token: str = Depends(_require_auth)
-) -> dict:
+async def review_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
     """Use Claude to review a completed task's diff and produce a review report.
 
     Returns risks, missing tests, suspicious changes, and files
@@ -1050,9 +1047,7 @@ async def retry_task_endpoint(
 
 
 @app.get("/tasks/{task_id}/bundle")
-async def export_bundle_endpoint(
-    task_id: str, token: str = Depends(_require_auth)
-) -> dict:
+async def export_bundle_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
     """Export a reproducible task bundle with all artifacts.
 
     Returns a JSON bundle containing prompt, repo, diff, audit, cost,

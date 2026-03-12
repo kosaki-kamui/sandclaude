@@ -58,7 +58,8 @@ async def create_pr(task: Task, *, title: str | None = None) -> dict:
     )
 
     risk = generate_risk_summary(
-        diff, audit,
+        diff,
+        audit,
         tokens_input=task.tokens_input or 0,
         tokens_output=task.tokens_output or 0,
         cost_usd=task.total_cost_usd or 0.0,
@@ -66,7 +67,11 @@ async def create_pr(task: Task, *, title: str | None = None) -> dict:
     risk_md = format_risk_summary_markdown(risk)
 
     pr_body = _build_pr_body(
-        task, audit, diff, ai_summary=ai_summary, risk_summary=risk_md,
+        task,
+        audit,
+        diff,
+        ai_summary=ai_summary,
+        risk_summary=risk_md,
     )
 
     # Resolve repo working directory
@@ -462,7 +467,10 @@ def _build_commit_message(task: Task, audit: dict, diff: str, pr_title: str) -> 
 
 
 def _build_pr_body(
-    task: Task, audit: dict, diff: str, *,
+    task: Task,
+    audit: dict,
+    diff: str,
+    *,
     ai_summary: str | None = None,
     risk_summary: str | None = None,
 ) -> str:
