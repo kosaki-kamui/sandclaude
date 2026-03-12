@@ -26,10 +26,12 @@ import secrets as _secrets
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 from sandclaude.auth import (
     generate_token,
@@ -151,7 +153,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="sandclaude", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="sandclaude", version="0.2.0", lifespan=lifespan)
 security = HTTPBearer(auto_error=False)
 
 
@@ -586,6 +588,116 @@ async def reject_action_endpoint(
     return {"status": "rejected", "task_id": task_id, "action": action}
 
 
+# ── v0.2.0: Approval UI (server-rendered) ────────────────────
+
+
+@app.get("/approve/{task_id}/{action}")
+async def approval_ui_page(
+    task_id: str, action: str, token: str = ""
+) -> HTMLResponse:
+    """Server-rendered approval page. Linked from Slack/webhook notifications.
+
+    The token is passed as a query parameter for one-click access from
+    notification links. This is acceptable because:
+    - The URL is sent to the task owner via a private channel (Slack DM, webhook)
+    - The page only shows task metadata and diff (same as GET /tasks/{id})
+    - Actual approve/reject actions use the token via API call from the page JS
+    """
+    if not token:
+        return HTMLResponse("<h1>401 — Missing token</h1>", status_code=401)
+    try:
+        verify_token(token)
+    except HTTPException:
+        return HTMLResponse("<h1>401 — Invalid token</h1>", status_code=401)
+
+    task = await db.get_task(task_id)
+    if not task:
+        return HTMLResponse("<h1>404 — Task not found</h1>", status_code=404)
+
+    gates = await db.get_approval_gates(task_id)
+    has_pending = any(g.status.value == "pending" for g in gates)
+
+    # Build context
+    diff_preview = ""
+    risk_level = "low"
+    risk_reasons: list[str] = []
+    files_changed: list[str] = []
+
+    task_dir = settings.data_dir / "tasks" / task.id
+    diff_path = task_dir / "diff.patch"
+    if diff_path.exists():
+        try:
+            raw_diff = diff_path.read_text()[:10000]
+            diff_preview = _colorize_diff(raw_diff)
+            from sandclaude.risk import generate_risk_summary
+
+            audit_path = task_dir / "audit.json"
+            audit: dict = {}
+            if audit_path.exists():
+                audit = json.loads(audit_path.read_text())
+            summary = generate_risk_summary(raw_diff, audit)
+            risk_level = summary.risk_level
+            risk_reasons = summary.risk_reasons
+            files_changed = summary.files_changed
+        except Exception:
+            diff_preview = "(error reading diff)"
+
+    duration = "?"
+    if task.started_at and task.completed_at:
+        try:
+            from datetime import datetime
+
+            s = datetime.fromisoformat(task.started_at.replace("Z", "+00:00"))
+            e = datetime.fromisoformat(task.completed_at.replace("Z", "+00:00"))
+            secs = (e - s).total_seconds()
+            duration = f"{secs / 60:.1f}m" if secs >= 60 else f"{secs:.0f}s"
+        except Exception:
+            pass
+
+    from pathlib import Path
+
+    from jinja2 import Environment, FileSystemLoader
+
+    template_dir = Path(__file__).parent.parent / "templates"
+    env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
+    template = env.get_template("approve.html")
+
+    html = template.render(
+        task_id=task.id,
+        action=action,
+        prompt=task.prompt[:500],
+        model=task.model,
+        duration=duration,
+        cost=f"{task.total_cost_usd:.4f}" if task.total_cost_usd else "?",
+        risk_level=risk_level,
+        risk_reasons=risk_reasons,
+        files_changed=files_changed,
+        diff_preview=diff_preview,
+        gates=[{"status": g.status.value, "action": g.action, "reason": g.reason} for g in gates],
+        has_pending=has_pending,
+        approval_token=token,
+    )
+    return HTMLResponse(html)
+
+
+def _colorize_diff(diff: str) -> str:
+    """Simple HTML colorization for diff preview (escaped)."""
+    import html
+
+    lines = []
+    for line in diff.split("\n")[:200]:
+        escaped = html.escape(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            lines.append(f'<span class="diff-add">{escaped}</span>')
+        elif line.startswith("-") and not line.startswith("---"):
+            lines.append(f'<span class="diff-del">{escaped}</span>')
+        elif line.startswith("@@") or line.startswith("diff "):
+            lines.append(f'<span class="diff-header">{escaped}</span>')
+        else:
+            lines.append(escaped)
+    return "\n".join(lines)
+
+
 # ── v0.2.0: Token management ─────────────────────────────────
 
 
@@ -869,6 +981,150 @@ async def get_task_secrets_endpoint(
         raise HTTPException(status_code=404, detail="Task not found")
     _require_task_owner(task.owner_token_hash, token)
     return await db.get_task_secrets(task_id)
+
+
+# ── v0.2.0: Retry / follow-up ─────────────────────────────────
+
+
+class RetryRequest(BaseModel):
+    prompt: str = Field(..., max_length=100_000)
+    max_turns: int | None = Field(None, ge=1, le=500)
+
+
+@app.post("/tasks/{task_id}/retry", status_code=201)
+async def retry_task_endpoint(
+    task_id: str,
+    body: RetryRequest,
+    token: str = Depends(_require_auth),
+) -> dict:
+    """Create a follow-up task that references the original.
+
+    The new task runs against the same repo/branch with a new prompt,
+    typically used for addressing review feedback or fixing test failures.
+    """
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status not in (TaskStatus.completed, TaskStatus.failed):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only retry completed or failed tasks (current: {task.status.value})",
+        )
+
+    # Build follow-up prompt with context from original task
+    follow_up_prompt = (
+        f"This is a follow-up to a previous task.\n\n"
+        f"Original prompt: {task.prompt[:500]}\n\n"
+        f"Follow-up instructions: {body.prompt}"
+    )
+
+    new_task_id = f"task-{_secrets.token_hex(8)}"
+    new_task = await db.create_task(
+        task_id=new_task_id,
+        repo=task.repo,
+        branch=task.branch,
+        prompt=follow_up_prompt,
+        model=task.model,
+        max_turns=body.max_turns or task.max_turns,
+        priority=TaskPriority(task.priority) if isinstance(task.priority, str) else task.priority,
+        owner_token_hash=token_fingerprint(token),
+        host_cwd=task.host_cwd,
+        policy_preset=task.policy_preset,
+        cost_budget_usd=task.cost_budget_usd,
+    )
+
+    from sandclaude.policy import create_required_gates, resolve_effective_policy
+
+    policy = await resolve_effective_policy(new_task)
+    await create_required_gates(new_task_id, policy)
+
+    await submit_task(new_task)
+    return new_task.safe_dump()
+
+
+# ── v0.2.0: Task bundle export ───────────────────────────────
+
+
+@app.get("/tasks/{task_id}/bundle")
+async def export_bundle_endpoint(
+    task_id: str, token: str = Depends(_require_auth)
+) -> dict:
+    """Export a reproducible task bundle with all artifacts.
+
+    Returns a JSON bundle containing prompt, repo, diff, audit, cost,
+    policies applied, and outcome metadata — useful for debugging,
+    compliance, and incident review.
+    """
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    bundle: dict = {
+        "version": "0.2.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "task": task.safe_dump(),
+    }
+
+    task_dir = settings.data_dir / "tasks" / task.id
+
+    # Include diff
+    diff_path = task_dir / "diff.patch"
+    if diff_path.exists():
+        try:
+            bundle["diff"] = await _read_file_async(diff_path)
+        except Exception:
+            bundle["diff"] = None
+
+    # Include audit
+    audit_path = task_dir / "audit.json"
+    if audit_path.exists():
+        try:
+            bundle["audit"] = await _read_json_async(audit_path)
+        except Exception:
+            bundle["audit"] = None
+
+    # Include result
+    result_path = task_dir / "result.json"
+    if result_path.exists():
+        try:
+            bundle["result"] = await _read_json_async(result_path)
+        except Exception:
+            bundle["result"] = None
+
+    # Include approval gates
+    gates = await db.get_approval_gates(task_id)
+    bundle["approval_gates"] = [g.model_dump() for g in gates]
+
+    # Include secrets audit
+    secrets = await db.get_task_secrets(task_id)
+    bundle["secrets_audit"] = secrets
+
+    # Include applied policy
+    if task.policy_preset:
+        preset = await db.get_policy_preset(task.policy_preset)
+        bundle["applied_policy"] = preset.model_dump() if preset else None
+
+    # Include risk summary if diff exists
+    if bundle.get("diff"):
+        from dataclasses import asdict
+
+        from sandclaude.risk import generate_risk_summary
+
+        summary = generate_risk_summary(
+            bundle["diff"],
+            bundle.get("audit") or {},
+            tokens_input=task.tokens_input or 0,
+            tokens_output=task.tokens_output or 0,
+            cost_usd=task.total_cost_usd or 0.0,
+        )
+        bundle["risk_summary"] = asdict(summary)
+
+    return bundle
 
 
 # ── WebSocket /tasks/{task_id}/stream ──────────────────────────

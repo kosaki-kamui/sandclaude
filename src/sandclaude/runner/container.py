@@ -435,6 +435,22 @@ async def run_task_in_container(task: Task) -> dict:
                 error_str = _sanitize_error_for_db(error_str)
             else:
                 error_str = None
+            # v0.2.0: Cost budget enforcement
+            if (
+                task.cost_budget_usd is not None
+                and cost is not None
+                and cost > task.cost_budget_usd
+            ):
+                status = TaskStatus.failed
+                error_str = (
+                    f"Cost budget exceeded: ${cost:.4f} > "
+                    f"${task.cost_budget_usd:.4f} budget"
+                )
+                logger.warning(
+                    "Task %s exceeded cost budget (%.4f > %.4f)",
+                    task.id, cost, task.cost_budget_usd,
+                )
+
             await db.update_task(
                 task.id,
                 status=status,

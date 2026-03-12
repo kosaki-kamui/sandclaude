@@ -328,6 +328,10 @@ class PolicyPresetConfig(BaseModel):
     max_cost_usd: float | None = None
     timeout_s: int | None = None
     model: str | None = None
+    # v0.2.0 Phase 4: Repo and branch policy
+    allowed_repos: list[str] | None = None  # repo URL patterns or "." for local
+    blocked_branches: list[str] | None = None  # branches that cannot be targeted
+    pr_only: bool = False  # if True, direct push is blocked (only PRs allowed)
 
 
 # ---------------------------------------------------------------------------

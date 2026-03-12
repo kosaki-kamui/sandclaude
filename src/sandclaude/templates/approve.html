@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sandclaude — Approve Task {{ task_id }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; padding: 2rem; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #f0f6fc; margin-bottom: 0.5rem; font-size: 1.5rem; }
+        .subtitle { color: #8b949e; margin-bottom: 2rem; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1.5rem; margin-bottom: 1.5rem; }
+        .card h2 { color: #f0f6fc; font-size: 1.1rem; margin-bottom: 1rem; }
+        .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem; }
+        .meta-item { font-size: 0.9rem; }
+        .meta-label { color: #8b949e; }
+        .meta-value { color: #c9d1d9; font-weight: 500; }
+        .risk-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+        .risk-low { background: #1a3a2a; color: #3fb950; }
+        .risk-medium { background: #3a3520; color: #d29922; }
+        .risk-high { background: #3a1a1a; color: #f85149; }
+        .prompt { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1rem; font-style: italic; color: #8b949e; margin-bottom: 1rem; max-height: 100px; overflow-y: auto; }
+        .diff-preview { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1rem; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.85rem; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+        .diff-add { color: #3fb950; }
+        .diff-del { color: #f85149; }
+        .diff-header { color: #79c0ff; }
+        .gates { margin-top: 1rem; }
+        .gate { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0; border-bottom: 1px solid #21262d; }
+        .gate:last-child { border-bottom: none; }
+        .gate-status { font-size: 0.8rem; padding: 2px 8px; border-radius: 12px; }
+        .gate-pending { background: #3a3520; color: #d29922; }
+        .gate-approved { background: #1a3a2a; color: #3fb950; }
+        .gate-rejected { background: #3a1a1a; color: #f85149; }
+        .actions { display: flex; gap: 1rem; margin-top: 1.5rem; }
+        .btn { padding: 0.6rem 1.5rem; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+        .btn:hover { opacity: 0.9; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-approve { background: #238636; color: #fff; }
+        .btn-reject { background: #da3633; color: #fff; }
+        .reason-input { width: 100%; padding: 0.5rem; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 0.9rem; margin-bottom: 1rem; }
+        .result-msg { padding: 1rem; border-radius: 6px; margin-top: 1rem; font-weight: 500; }
+        .result-ok { background: #1a3a2a; color: #3fb950; border: 1px solid #238636; }
+        .result-err { background: #3a1a1a; color: #f85149; border: 1px solid #da3633; }
+        .files-list { font-size: 0.85rem; font-family: monospace; }
+        .files-list li { padding: 2px 0; }
+        .footer { text-align: center; color: #484f58; font-size: 0.8rem; margin-top: 3rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>sandclaude Task Approval</h1>
+        <p class="subtitle">{{ task_id }} — {{ action }}</p>
+
+        <div class="card">
+            <h2>Task Summary</h2>
+            <div class="prompt">{{ prompt }}</div>
+            <div class="meta">
+                <div class="meta-item">
+                    <span class="meta-label">Model:</span>
+                    <span class="meta-value">{{ model }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Duration:</span>
+                    <span class="meta-value">{{ duration }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Cost:</span>
+                    <span class="meta-value">${{ cost }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Risk:</span>
+                    <span class="risk-badge risk-{{ risk_level }}">{{ risk_level }}</span>
+                </div>
+            </div>
+        </div>
+
+        {% if risk_reasons %}
+        <div class="card">
+            <h2>Risk Signals</h2>
+            <ul>
+                {% for reason in risk_reasons %}
+                <li>{{ reason }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if files_changed %}
+        <div class="card">
+            <h2>Files Changed ({{ files_changed|length }})</h2>
+            <ul class="files-list">
+                {% for f in files_changed %}
+                <li>{{ f }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if diff_preview %}
+        <div class="card">
+            <h2>Diff Preview</h2>
+            <div class="diff-preview">{{ diff_preview }}</div>
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <h2>Approval Gates</h2>
+            <div class="gates">
+                {% for gate in gates %}
+                <div class="gate">
+                    <span class="gate-status gate-{{ gate.status }}">{{ gate.status }}</span>
+                    <span>{{ gate.action }}</span>
+                    {% if gate.reason %}<span style="color: #8b949e">— {{ gate.reason }}</span>{% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if has_pending %}
+        <div class="card">
+            <h2>Decision</h2>
+            <input type="text" class="reason-input" id="reason" placeholder="Reason (optional)">
+            <div class="actions">
+                <button class="btn btn-approve" id="approveBtn" onclick="decide('approve')">Approve</button>
+                <button class="btn btn-reject" id="rejectBtn" onclick="decide('reject')">Reject</button>
+            </div>
+            <div id="result"></div>
+        </div>
+        {% endif %}
+
+        <p class="footer">sandclaude v0.2.0 — all changes require human review before merge</p>
+    </div>
+
+    <script>
+        async function decide(decision) {
+            const reason = document.getElementById('reason').value;
+            const approveBtn = document.getElementById('approveBtn');
+            const rejectBtn = document.getElementById('rejectBtn');
+            approveBtn.disabled = true;
+            rejectBtn.disabled = true;
+
+            try {
+                const resp = await fetch(`/tasks/{{ task_id }}/${decision}/{{ action }}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer {{ approval_token }}'
+                    },
+                    body: JSON.stringify({ reason: reason || null })
+                });
+                const data = await resp.json();
+                const resultDiv = document.getElementById('result');
+                if (resp.ok) {
+                    resultDiv.innerHTML = `<div class="result-msg result-ok">✓ ${decision === 'approve' ? 'Approved' : 'Rejected'} successfully</div>`;
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    resultDiv.innerHTML = `<div class="result-msg result-err">✗ ${data.detail || 'Unknown error'}</div>`;
+                    approveBtn.disabled = false;
+                    rejectBtn.disabled = false;
+                }
+            } catch (e) {
+                document.getElementById('result').innerHTML = `<div class="result-msg result-err">✗ Network error</div>`;
+                approveBtn.disabled = false;
+                rejectBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

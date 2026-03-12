@@ -89,3 +89,34 @@ def check_secret_allowed(policy: PolicyPresetConfig, secret_name: str) -> bool:
         # No restriction — all secrets allowed
         return True
     return secret_name in policy.allowed_secrets
+
+
+def check_repo_allowed(policy: PolicyPresetConfig, repo: str) -> str | None:
+    """Check if a repo is allowed by the policy.
+
+    Returns None if allowed, or an error message if blocked.
+    """
+    if policy.allowed_repos is None:
+        return None  # no restriction
+    for pattern in policy.allowed_repos:
+        if pattern == repo:
+            return None
+        if pattern == "." and repo == ".":
+            return None
+        # Simple prefix matching for URL patterns
+        if repo.startswith(pattern):
+            return None
+    return f"Repo '{repo}' is not in the allowed repos for this preset"
+
+
+def check_branch_allowed(policy: PolicyPresetConfig, branch: str | None) -> str | None:
+    """Check if a branch is allowed by the policy.
+
+    Returns None if allowed, or an error message if blocked.
+    """
+    if not branch or not policy.blocked_branches:
+        return None
+    for blocked in policy.blocked_branches:
+        if branch == blocked:
+            return f"Branch '{branch}' is blocked by policy"
+    return None
