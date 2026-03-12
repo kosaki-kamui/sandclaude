@@ -39,10 +39,10 @@
 
 ## 4. Audit Trail Is Mandatory, Not Optional
 
-**Decision:** Every task produces a complete audit log. There is no way to disable it.
+**Decision:** Every task produces a structured audit log. There is no way to disable it.
 
 **Reasoning:**
-- Enterprise teams need audit trails for compliance (SOC2, HIPAA).
+- Teams benefit from audit trails for reviewing agent behavior and tracking what changed.
 - The audit log is the primary "wow" moment in demos: it demonstrates transparency.
 - Storage cost is negligible (JSON files, a few KB per task).
 - Making it optional would introduce a configuration surface that users could misconfigure.

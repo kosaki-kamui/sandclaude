@@ -1,8 +1,7 @@
 """
 GitHub PR creation from completed task diffs.
 
-MVP uses `gh` CLI (simpler, uses existing auth).
-PyGithub is available as optional fallback when GITHUB_TOKEN is set.
+Uses `gh` CLI for PR creation and GIT_TOKEN (via GH_TOKEN) for authentication.
 """
 
 from __future__ import annotations
@@ -94,8 +93,8 @@ async def create_pr(task: Task, *, title: str | None = None) -> dict:
         commit_msg = _build_commit_message(task, audit, diff, pr_title)
         await _run_git(["commit", "-m", commit_msg], cwd=work_cwd)
 
-        env = _git_credential_env()
-        await _run_git(["push", "-u", "origin", branch_name], cwd=work_cwd, env=env)
+        with _GitCredentialHelper() as env:
+            await _run_git(["push", "-u", "origin", branch_name], cwd=work_cwd, env=env)
 
         # Create PR via gh CLI
         if not shutil.which("gh"):
@@ -170,9 +169,9 @@ async def _resolve_repo_dir(task: Task) -> tuple[str, str | None]:
     if repo.startswith(("https://", "git@")):
         tmp_dir = tempfile.mkdtemp(prefix="sandclaude-pr-")
         # Configure git credentials for private repo cloning
-        env = _git_credential_env()
-        branch_args = ["--branch", task.branch] if task.branch else []
-        await _run_git(["clone", "--depth", "50", *branch_args, repo, tmp_dir], env=env)
+        with _GitCredentialHelper() as env:
+            branch_args = ["--branch", task.branch] if task.branch else []
+            await _run_git(["clone", "--depth", "50", *branch_args, repo, tmp_dir], env=env)
         return tmp_dir, tmp_dir
 
     # Local path — mirror container.py's production enforcement (S2)
@@ -224,27 +223,37 @@ async def _run_git(
     return proc.stdout
 
 
-def _git_credential_env() -> dict[str, str] | None:
-    """Return env vars that configure git credential helper for private repos.
+class _GitCredentialHelper:
+    """Context manager that creates a secure GIT_ASKPASS script and cleans it up.
 
-    Uses GIT_ASKPASS with a script that echoes the token, which is cleaner
-    than modifying global git config on the API server.
-    Returns None if no git_token is configured.
+    Uses mkstemp() (not mktemp()) to avoid TOCTOU race conditions, sets strict
+    permissions (0o700), and guarantees cleanup via __exit__.
     """
-    token = settings.git_token
-    if not token:
-        return None
-    # GIT_ASKPASS is called by git for username/password prompts.
-    # We provide a tiny script that returns the token for password
-    # and 'x-access-token' for username.
-    askpass = tempfile.mktemp(prefix="sandclaude-askpass-", suffix=".sh")
-    with open(askpass, "w") as f:
-        f.write(f'#!/bin/sh\necho "{token}"\n')
-    os.chmod(askpass, 0o700)
-    return {
-        "GIT_ASKPASS": askpass,
-        "GIT_TERMINAL_PROMPT": "0",
-    }
+
+    def __init__(self) -> None:
+        self._path: str | None = None
+
+    def __enter__(self) -> dict[str, str] | None:
+        token = settings.git_token
+        if not token:
+            return None
+        fd, self._path = tempfile.mkstemp(prefix="sandclaude-askpass-", suffix=".sh")
+        try:
+            os.fchmod(fd, 0o700)
+            os.write(fd, f'#!/bin/sh\necho "{token}"\n'.encode())
+        finally:
+            os.close(fd)
+        return {
+            "GIT_ASKPASS": self._path,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+    def __exit__(self, *exc: object) -> None:
+        if self._path:
+            try:
+                os.unlink(self._path)
+            except OSError:
+                pass
 
 
 async def _generate_ai_commit_title(prompt: str, diff: str) -> str | None:

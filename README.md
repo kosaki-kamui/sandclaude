@@ -14,7 +14,7 @@ Claude Code in your terminal is great for interactive work. But sometimes you wa
 
 - **Submit 10 tasks and go to lunch** - not sit there approving each file edit
 - **Keep proprietary code off third-party servers** - only API messages reach Anthropic, never your full repo
-- **Get a compliance-grade audit trail** - every file read, every command run, every network request logged
+- **Get a structured audit trail** - every file read, every command run, network requests inferred from tool calls
 - **Run tasks from CI, Slack, or a webhook** - not just from a developer's terminal
 - **Let your team share one agent server** - with concurrent execution and priority queues
 
@@ -28,23 +28,23 @@ sandclaude is the bridge between "Claude can code" and "Claude can code *for my 
 | **Workflow** | Sit at terminal the whole time | Fire-and-forget via API |
 | **Concurrency** | One task per terminal | Up to 3 parallel (configurable) |
 | **Network** | Full internet, no restrictions | Sandboxed - only Anthropic API + your allowlist |
-| **Audit** | Scroll through terminal history | Structured JSON: files, commands, network, cost |
+| **Audit** | Scroll through terminal history | Structured JSON: files, commands, network (best-effort), cost |
 | **Data residency** | Code on your laptop | Code stays in your VPC / AWS / on-prem server |
 | **Team access** | One developer at a time | Shared server with API auth |
 | **Cost tracking** | Check Anthropic dashboard | Per-task: tokens in/out, USD cost |
 | **Notifications** | Watch the terminal | Slack/webhook on completion or failure |
-| **GitHub PRs** | Create manually | One API call |
+| **GitHub PRs** | Create manually | One API call (requires `gh` CLI) |
 | **Best for** | Pair-programming, exploration | Batch jobs, CI, team agent, compliance work |
 
 ## Key Features
 
 - **Fire-and-forget execution** - submit via REST API or MCP plugin, check back later
 - **Two-phase network sandbox** - full internet for setup, locked down for agent execution
-- **Complete audit trail** - every file touched, command run, and network request (allowed or blocked)
+- **Structured audit trail** - every file touched, command run, and network requests inferred from tool calls (not packet-level capture)
 - **Concurrent task pool** - run multiple tasks in parallel with priority queue (high/normal/low)
 - **Per-task cost tracking** - tokens in, tokens out, USD cost per task
 - **Webhook + Slack notifications** - get pinged when tasks complete or fail, with inline diff, cost, and audit summary
-- **One-click GitHub PRs** - `POST /tasks/{task_id}/create-pr` turns a completed task into a PR with AI-generated summary
+- **One-click GitHub PRs** - `POST /tasks/{task_id}/create-pr` turns a completed task into a PR with AI-generated summary (requires [`gh` CLI](https://cli.github.com) + `GIT_TOKEN`)
 - **Claude Code MCP plugin** - use sandclaude from inside Claude Code with natural language
 - **Automatic cleanup** - old tasks auto-deleted after configurable retention period
 - **Orphan recovery** - crashed containers detected and cleaned up on server restart
@@ -84,10 +84,13 @@ Every task runs in two phases inside a Docker container:
 1. **Setup Phase** - full internet access to clone the repo
 2. **Agent Phase** - network restricted to `api.anthropic.com` + configurable `allowed_domains` (e.g., package registries). Claude determines and installs dependencies itself. All other outbound traffic, ICMP, and IPv6 are blocked via in-container iptables rules
 
+> **Note on IP resolution:** Allowed domains are resolved to IP addresses on the host *before* the agent phase begins, and static iptables rules are written for those IPs. If a domain uses CDN/IP rotation, the resolved IPs may go stale during long-running tasks. This rarely affects typical tasks (which complete in minutes), but may cause intermittent connectivity for very long tasks against domains with aggressive IP rotation. An ipset refresh strategy is planned for a future release.
+
 ## Quick Start
 
 ```bash
 # Prerequisites: Python 3.10+, Docker
+# Optional for PR creation: gh CLI (https://cli.github.com) + GIT_TOKEN
 
 # 1. Clone and install
 git clone https://github.com/kosaki-kamui/sandclaude.git
@@ -143,7 +146,7 @@ Developer                    sandclaude                     Docker Container
 
 **Startups** - shared agent server for the whole team. Priority queue means urgent fixes jump ahead of batch refactors. Per-task cost tracking for burn rate visibility.
 
-**Enterprise security & compliance teams** - code never leaves your VPC. Every agent action is audited. Network isolation prevents exfiltration. Exactly what your CISO wants to hear before approving AI coding tools.
+**Security-conscious teams** - code never leaves your VPC. Agent actions are audited. Network isolation prevents common exfiltration vectors. Strong guardrails for self-hosted agent execution — though not yet VM-level isolation (see [Limitations](#limitations--when-not-to-use-this)).
 
 ## API
 
@@ -196,10 +199,10 @@ Then use natural language:
 
 ### Audit Trail
 
-Every task produces a complete audit log:
-- Files read and written
-- Shell commands executed
-- Network requests (allowed and blocked)
+Every task produces a structured audit log:
+- Files read and written (from Claude's tool calls)
+- Shell commands executed (from Bash tool calls)
+- Network requests — best-effort, inferred from tool calls (curl/wget in Bash, WebFetch). Not packet-level capture; container-level network logging is planned for a future release
 - Token consumption and cost
 
 ### What This Does NOT Protect Against
@@ -217,6 +220,8 @@ Every task produces a complete audit log:
 - **Single-machine Docker only** - No Kubernetes, no Firecracker, no multi-region. MVP is designed for a single Docker host.
 - **Agent SDK behavior may vary** - The Claude Agent SDK is evolving. Behavior at `maxTurns` limits, error recovery, and context compaction may change between versions.
 - **Network audit is best-effort** - Network requests are inferred from tool calls (curl/wget in Bash, WebFetch), not captured at the network level. Container-level packet logging is planned for future.
+- **Auth is static bearer tokens** - No scopes, expiry, rotation, or user identity layer. Fine for solo/small-team use. Proper multi-tenant auth (OIDC, scoped tokens, audit-linked identity) is planned as a future milestone.
+- **PR creation requires `gh` CLI** - The `gh` CLI must be installed and reachable. It is pre-installed in the Docker Compose setup, but bare-metal deployments must install it separately. See [gh CLI installation](https://cli.github.com).
 
 **When to use something else:**
 - If you're happy with GPT and don't need Claude - use Codex
@@ -240,8 +245,7 @@ Every task produces a complete audit log:
 | `DOCKER_HOST` | `tcp://socket-proxy:2375` (Compose) | Docker API endpoint used by server |
 | `ENVIRONMENT` | `production` | Runtime environment (`production`, `development`, `test`) |
 | `SKIP_NETWORK_ISOLATION` | `false` | Skip iptables rules (allowed only in `development`/`test`) |
-| `GIT_TOKEN` | (none) | Token for cloning private repos + creating PRs (GitHub PAT, GitLab token). Scrubbed before agent phase. |
-| `GITHUB_TOKEN` | (none) | GitHub personal access token (for PyGithub-based PR creation; `gh` CLI is the default) |
+| `GIT_TOKEN` | (none) | Token for cloning private repos + creating PRs via `gh` CLI (GitHub PAT, GitLab token). Passed as `GH_TOKEN` for PR creation. Scrubbed before agent phase. |
 | `ALLOWED_REPO_BASE` | (none) | Comma-separated allowed base dirs for local repo mounts (required in production if not using `HOST_CWD`) |
 | `WEBHOOK_INCLUDE_PROMPT` | `false` | Include task prompt excerpt in webhook payloads (off by default for privacy) |
 

@@ -144,7 +144,7 @@ curl -s -H "Authorization: Bearer $TOKEN" $HOST/tasks/task-XXXXX/diff
 
 ### Step 8: Create a PR (Optional)
 
-Requires `GIT_TOKEN` with write access (Contents: Read and write, Pull requests: Read and write):
+Requires the [`gh` CLI](https://cli.github.com) installed on the server and `GIT_TOKEN` with write access (Contents: Read and write, Pull requests: Read and write). The `gh` CLI is pre-installed in the Docker Compose setup; bare-metal deployments must install it separately.
 
 ```bash
 curl -s -X POST $HOST/tasks/task-XXXXX/create-pr \

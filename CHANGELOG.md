@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Fire-and-forget task execution** via REST API (`POST /tasks`)
 - **Two-phase network sandbox** — full internet for setup, iptables-locked for agent execution
-- **Complete audit trail** — every file read/written, command executed, and network request logged
+- **Structured audit trail** — every file read/written, command executed, and network requests inferred from tool calls
 - **Concurrent task pool** with priority queue (high/normal/low) and configurable parallelism
 - **Per-task cost tracking** — tokens in/out, USD cost
 - **Webhook + Slack notifications** with inline diff, cost summary, and audit stats
-- **One-click GitHub PRs** from completed tasks with AI-generated summaries (Claude Haiku)
+- **One-click GitHub PRs** from completed tasks with AI-generated summaries (requires `gh` CLI + `GIT_TOKEN`)
 - **Claude Code MCP plugin** — submit and manage tasks from inside Claude Code
 - **Real-time streaming** via WebSocket (`/tasks/{task_id}/stream`)
 - **Automatic cleanup** — old tasks auto-deleted after configurable retention period
