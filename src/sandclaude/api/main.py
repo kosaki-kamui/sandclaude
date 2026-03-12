@@ -235,7 +235,7 @@ def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 # ── Pool stats ─────────────────────────────────────────────────
@@ -639,8 +639,9 @@ async def approval_ui_page(
             risk_level = summary.risk_level
             risk_reasons = summary.risk_reasons
             files_changed = summary.files_changed
-        except Exception:
-            diff_preview = "(error reading diff)"
+        except Exception as exc:
+            logger.warning("Error loading diff/audit for approval UI %s: %s", task_id, exc)
+            diff_preview = "(error reading diff or audit data)"
 
     duration = "?"
     if task.started_at and task.completed_at:
@@ -1029,7 +1030,7 @@ async def retry_task_endpoint(
         prompt=follow_up_prompt,
         model=task.model,
         max_turns=body.max_turns or task.max_turns,
-        priority=TaskPriority(task.priority) if isinstance(task.priority, str) else task.priority,
+        priority=task.priority,
         owner_token_hash=token_fingerprint(token),
         host_cwd=task.host_cwd,
         policy_preset=task.policy_preset,

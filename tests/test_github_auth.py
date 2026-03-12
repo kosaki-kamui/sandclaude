@@ -227,8 +227,9 @@ class TestProviderCompatibility:
                 content = open(env["GIT_ASKPASS"]).read()
                 # Must be a valid shell script
                 assert content.startswith("#!/bin/sh\n")
-                # Must echo the token
-                assert 'echo "github_pat_test123"' in content
+                # Must echo the token (shlex.quote leaves simple tokens unquoted)
+                assert "github_pat_test123" in content
+                assert "echo" in content
         finally:
             cfg.settings.git_token = original
 

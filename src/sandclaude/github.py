@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -256,7 +257,9 @@ class _GitCredentialHelper:
         fd, self._path = tempfile.mkstemp(prefix="sandclaude-askpass-", suffix=".sh")
         try:
             os.fchmod(fd, 0o700)
-            os.write(fd, f'#!/bin/sh\necho "{token}"\n'.encode())
+            # Use shlex.quote to prevent shell injection from token values
+            # containing metacharacters ($, `, ", newlines, etc.)
+            os.write(fd, f"#!/bin/sh\necho {shlex.quote(token)}\n".encode())
         finally:
             os.close(fd)
         return {
