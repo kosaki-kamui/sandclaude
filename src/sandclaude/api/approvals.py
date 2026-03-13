@@ -68,6 +68,7 @@ async def approve_action_endpoint(
         decision=ApprovalStatus.approved,
         decided_by=auth.fingerprint,
         reason=body.reason if body else None,
+        decided_by_user_id=auth.user_id,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="No pending approval gate found")
@@ -138,6 +139,7 @@ async def reject_action_endpoint(
         decision=ApprovalStatus.rejected,
         decided_by=auth.fingerprint,
         reason=body.reason if body else None,
+        decided_by_user_id=auth.user_id,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="No pending approval gate found")

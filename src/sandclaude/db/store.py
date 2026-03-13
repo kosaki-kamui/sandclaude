@@ -191,6 +191,7 @@ async def create_task(
     policy_preset: str | None = None,
     declared_secrets: list[str] | None = None,
     cost_budget_usd: float | None = None,
+    created_by_user_id: int | None = None,
 ) -> Task:
     now = datetime.now(timezone.utc).isoformat()
     allowed_domains_json = json.dumps(allowed_domains) if allowed_domains else None
@@ -201,8 +202,9 @@ async def create_task(
             """INSERT INTO tasks
                (id, status, repo, branch, prompt, model, max_turns, priority,
                 owner_token_hash, host_cwd, allowed_domains, notify_webhook, notify_on,
-                policy_preset, declared_secrets, cost_budget_usd, created_at)
-               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                policy_preset, declared_secrets, cost_budget_usd, created_by_user_id,
+                created_at)
+               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 repo,
@@ -219,6 +221,7 @@ async def create_task(
                 policy_preset,
                 declared_secrets_json,
                 cost_budget_usd,
+                created_by_user_id,
                 now,
             ),
         )
@@ -474,6 +477,7 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         declared_secrets=row["declared_secrets"] if "declared_secrets" in keys else None,
         cost_budget_usd=row["cost_budget_usd"] if "cost_budget_usd" in keys else None,
         budget_check_json=row["budget_check_json"] if "budget_check_json" in keys else None,
+        created_by_user_id=row["created_by_user_id"] if "created_by_user_id" in keys else None,
     )
 
 
@@ -530,16 +534,18 @@ async def decide_approval_gate(
     decision: ApprovalStatus,
     decided_by: str,
     reason: str | None = None,
+    decided_by_user_id: int | None = None,
 ) -> bool:
     """Approve or reject a gate. Returns True if a pending gate was found and updated."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_db_path()) as db:
-        cursor = await db.execute(
-            "UPDATE approval_gates SET status = ?, reason = ?, decided_by = ?, decided_at = ? "
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute(
+            "UPDATE approval_gates SET status = ?, reason = ?, decided_by = ?, "
+            "decided_at = ?, decided_by_user_id = ? "
             "WHERE task_id = ? AND action = ? AND status = 'pending'",
-            (decision.value, reason, decided_by, now, task_id, action),
+            (decision.value, reason, decided_by, now, decided_by_user_id, task_id, action),
         )
-        await db.commit()
+        await conn.commit()
         return cursor.rowcount > 0
 
 
@@ -565,16 +571,18 @@ async def create_token(
     scopes: list[str],
     expires_at: str | None = None,
     created_by: str | None = None,
+    user_id: int | None = None,
 ) -> TokenInfo:
     now = datetime.now(timezone.utc).isoformat()
     scopes_json = json.dumps(scopes)
-    async with aiosqlite.connect(_db_path()) as db:
-        cursor = await db.execute(
-            "INSERT INTO tokens (name, token_hash, scopes, created_at, expires_at, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (name, token_hash, scopes_json, now, expires_at, created_by),
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute(
+            "INSERT INTO tokens "
+            "(name, token_hash, scopes, created_at, expires_at, created_by, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, token_hash, scopes_json, now, expires_at, created_by, user_id),
         )
-        await db.commit()
+        await conn.commit()
         token_id = cursor.lastrowid
     return TokenInfo(
         id=token_id or 0,
@@ -584,6 +592,7 @@ async def create_token(
         created_at=now,
         expires_at=expires_at,
         created_by=created_by,
+        user_id=user_id,
     )
 
 

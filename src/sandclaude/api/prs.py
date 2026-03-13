@@ -109,6 +109,7 @@ async def approve_and_create_pr_endpoint(
             decision=ApprovalStatus.approved,
             decided_by=auth.fingerprint,
             reason=body.reason if body else None,
+            decided_by_user_id=auth.user_id,
         )
         if not await db.has_pending_gates(task_id):
             await db.update_task(task_id, requires_approval=0)

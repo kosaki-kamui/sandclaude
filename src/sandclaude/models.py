@@ -165,6 +165,7 @@ class Task(BaseModel):
     declared_secrets: str | None = None  # JSON-encoded list of requested secret names
     cost_budget_usd: float | None = None
     budget_check_json: str | None = None  # JSON-encoded budget_check from admission
+    created_by_user_id: int | None = None  # v0.3.0: user who created this task
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""
@@ -284,6 +285,7 @@ class TokenCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     scopes: list[str]
     expires_in_days: int | None = Field(None, ge=1, le=365)
+    user_id: int | None = None  # v0.3.0: which user owns this token (admin-only)
 
     @field_validator("scopes")
     @classmethod
