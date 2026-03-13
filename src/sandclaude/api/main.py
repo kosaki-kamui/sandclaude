@@ -535,6 +535,66 @@ async def create_pr_endpoint(
         raise HTTPException(status_code=500, detail=_sanitize_error(exc))  # S9
 
 
+@app.post("/tasks/{task_id}/approve-and-create-pr")
+async def approve_and_create_pr_endpoint(
+    task_id: str,
+    body: ApprovalDecisionRequest | None = None,
+    token: str = Depends(_require_auth),
+) -> dict:
+    """Approve the create_pr gate and create the PR in one step.
+
+    Requires tasks:approve scope. If the gate is already approved,
+    skips the approval step and creates the PR directly. If rejected,
+    returns 403. If no create_pr gate exists, creates the PR directly.
+    """
+    auth = await verify_token_with_scopes(token)
+    require_scope(auth, "tasks:approve")
+
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, token)
+
+    if task.status != TaskStatus.completed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot create PR for task in status: {task.status.value}",
+        )
+
+    # Handle the approval gate
+    gates = await db.get_approval_gates(task_id)
+    pr_gate = next((g for g in gates if g.action == "create_pr"), None)
+
+    if pr_gate and pr_gate.status == ApprovalStatus.rejected:
+        raise HTTPException(
+            status_code=403,
+            detail="PR creation was rejected for this task.",
+        )
+
+    if pr_gate and pr_gate.status == ApprovalStatus.pending:
+        await db.decide_approval_gate(
+            task_id,
+            "create_pr",
+            decision=ApprovalStatus.approved,
+            decided_by=auth.fingerprint,
+            reason=body.reason if body else None,
+        )
+        if not await db.has_pending_gates(task_id):
+            await db.update_task(task_id, requires_approval=0)
+
+    # Create the PR
+    try:
+        pr_result = await create_pr(task, title=None)
+        return {
+            "status": "approved",
+            "task_id": task_id,
+            "pr": pr_result,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=_sanitize_error(exc))
+
+
 # ── v0.2.0: Approval gates ────────────────────────────────────
 
 
@@ -714,11 +774,19 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
     env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=True)
     template = env.get_template("approve.html")
 
+    # PR branch context
+    pr_source_branch = f"sandclaude/{task.id}"
+    pr_target_branch = task.branch or "(default branch)"
+
     html = template.render(
         task_id=task.id,
         action=action,
         prompt=task.prompt[:500],
         model=task.model,
+        repo=task.repo,
+        branch=task.branch or "(default)",
+        pr_source_branch=pr_source_branch,
+        pr_target_branch=pr_target_branch,
         duration=duration,
         cost=f"{task.total_cost_usd:.4f}" if task.total_cost_usd else "?",
         risk_level=risk_level,
@@ -727,6 +795,7 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
         diff_preview=diff_preview,
         gates=[{"status": g.status.value, "action": g.action, "reason": g.reason} for g in gates],
         has_pending=has_pending,
+        has_create_pr_gate=any(g.action == "create_pr" for g in gates),
     )
     return HTMLResponse(html)
 

@@ -57,6 +57,18 @@
             <div class="prompt">{{ prompt }}</div>
             <div class="meta">
                 <div class="meta-item">
+                    <span class="meta-label">Repo:</span>
+                    <span class="meta-value">{{ repo }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Branch:</span>
+                    <span class="meta-value">{{ branch }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">PR:</span>
+                    <span class="meta-value">{{ pr_source_branch }} &rarr; {{ pr_target_branch }}</span>
+                </div>
+                <div class="meta-item">
                     <span class="meta-label">Model:</span>
                     <span class="meta-value">{{ model }}</span>
                 </div>
@@ -127,6 +139,9 @@
             <input type="text" class="reason-input" id="reason" placeholder="Reason (optional)">
             <div class="actions">
                 <button class="btn btn-approve" id="approveBtn" onclick="decide('approve')">Approve</button>
+                {% if has_create_pr_gate %}
+                <button class="btn btn-approve" id="approveAndPrBtn" onclick="approveAndCreatePR()" style="background: #1a6334;">Approve and create PR</button>
+                {% endif %}
                 <button class="btn btn-reject" id="rejectBtn" onclick="decide('reject')">Reject</button>
             </div>
             <div id="result"></div>
@@ -137,6 +152,13 @@
     </div>
 
     <script>
+        function disableAllButtons() {
+            document.querySelectorAll('.btn').forEach(b => b.disabled = true);
+        }
+        function enableAllButtons() {
+            document.querySelectorAll('.btn').forEach(b => b.disabled = false);
+        }
+
         async function decide(decision) {
             const apiToken = document.getElementById('apiToken').value;
             if (!apiToken) {
@@ -144,10 +166,7 @@
                 return;
             }
             const reason = document.getElementById('reason').value;
-            const approveBtn = document.getElementById('approveBtn');
-            const rejectBtn = document.getElementById('rejectBtn');
-            approveBtn.disabled = true;
-            rejectBtn.disabled = true;
+            disableAllButtons();
 
             try {
                 const resp = await fetch(`/tasks/{{ task_id }}/${decision}/{{ action }}`, {
@@ -165,13 +184,45 @@
                     setTimeout(() => location.reload(), 1500);
                 } else {
                     resultDiv.innerHTML = `<div class="result-msg result-err">✗ ${data.detail || 'Unknown error'}</div>`;
-                    approveBtn.disabled = false;
-                    rejectBtn.disabled = false;
+                    enableAllButtons();
                 }
             } catch (e) {
                 document.getElementById('result').innerHTML = `<div class="result-msg result-err">✗ Network error</div>`;
-                approveBtn.disabled = false;
-                rejectBtn.disabled = false;
+                enableAllButtons();
+            }
+        }
+
+        async function approveAndCreatePR() {
+            const apiToken = document.getElementById('apiToken').value;
+            if (!apiToken) {
+                document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
+                return;
+            }
+            const reason = document.getElementById('reason').value;
+            disableAllButtons();
+
+            try {
+                const resp = await fetch(`/tasks/{{ task_id }}/approve-and-create-pr`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + apiToken
+                    },
+                    body: JSON.stringify({ reason: reason || null })
+                });
+                const data = await resp.json();
+                const resultDiv = document.getElementById('result');
+                if (resp.ok) {
+                    const prUrl = data.pr && data.pr.url ? data.pr.url : '';
+                    const prLink = prUrl ? ` — <a href="${prUrl}" target="_blank" style="color: #58a6ff;">${prUrl}</a>` : '';
+                    resultDiv.innerHTML = `<div class="result-msg result-ok">✓ Approved and PR created${prLink}</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="result-msg result-err">✗ ${data.detail || 'Unknown error'}</div>`;
+                    enableAllButtons();
+                }
+            } catch (e) {
+                document.getElementById('result').innerHTML = `<div class="result-msg result-err">✗ Network error</div>`;
+                enableAllButtons();
             }
         }
     </script>
