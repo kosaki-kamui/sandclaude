@@ -193,7 +193,28 @@ curl -s -X PUT $HOST/policies/budget-gated \
 # Tasks predicted to cost >$5 will block in pending_approval.
 # Tasks under budget proceed normally.
 # The estimator intentionally errs on the safe side — actual cost may be lower.
+
+# A developer submitting against this preset:
+DEV_TOKEN=your-developer-token
+curl -s -X POST $HOST/tasks \
+  -H "Authorization: Bearer $DEV_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "https://github.com/your-org/your-repo.git",
+    "prompt": "Fix the login rate limiter",
+    "policy_preset": "budget-gated",
+    "max_turns": 20
+  }' | jq .budget_check
+# If under $5 → {"status": "passed", ...} — task runs immediately
+# If over $5 → {"status": "requires_approval", ...} — task blocks
+# Approve: POST /tasks/{id}/approve/budget_exceeded
+# Reject:  POST /tasks/{id}/reject/budget_exceeded
 ```
+
+For a complete end-to-end walkthrough (all four budget outcomes, approval UI,
+retry behavior, and the admin/user split), see the
+[Budget Control Walkthrough](GETTING_STARTED.md#budget-control-walkthrough)
+in the Getting Started guide.
 
 ---
 

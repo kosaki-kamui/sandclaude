@@ -299,6 +299,256 @@ Use natural language in your Claude Code session:
 
 ---
 
+## Budget Control Walkthrough
+
+sandclaude can estimate task cost **before execution** and block tasks that would exceed a budget cap. This section walks through the full workflow — from setting a budget to handling each possible outcome.
+
+### How budget estimation works
+
+When a task has a budget cap (either from `cost_budget_usd` on the task or `max_cost_usd` on a preset), sandclaude runs a pre-flight cost estimate before the agent starts. The estimator uses model pricing, `max_turns`, prompt length, and any addon costs (AI review, PR title/summary). The estimate intentionally errs on the conservative side — actual cost is usually lower.
+
+The effective budget cap is always `min(preset.max_cost_usd, task.cost_budget_usd)`. A task can never raise the budget above the preset ceiling.
+
+### Admin: create a budget-controlled preset
+
+An admin creates a preset that controls how much any task using it can cost:
+
+```bash
+TOKEN=$(cat data/.token)
+HOST=http://localhost:3271
+
+# Strict budget: reject tasks predicted to cost more than $3
+curl -s -X PUT $HOST/policies/team-standard \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_cost_usd": 3.00,
+    "budget_fail_policy": "reject",
+    "max_turns": 25,
+    "requires_approval_for": ["create_pr"]
+  }' | jq .
+
+# Approval-gated budget: expensive tasks need human sign-off
+curl -s -X PUT $HOST/policies/team-reviewed \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_cost_usd": 5.00,
+    "budget_fail_policy": "require_approval",
+    "max_turns": 50,
+    "requires_approval_for": ["create_pr"]
+  }' | jq .
+```
+
+The three `budget_fail_policy` values:
+- **`reject`** (default) — task is rejected outright (HTTP 422), never created
+- **`warn`** — task proceeds with a warning in the response; no blocking
+- **`require_approval`** — task is created but blocked in `pending_approval` until a human approves or rejects the budget gate
+
+### User: submit a task with a budget
+
+A developer submits a task with a per-task budget. If the task also uses a preset, the effective cap is the lower of the two.
+
+```bash
+DEV_TOKEN=your-developer-token
+HOST=http://localhost:3271
+
+# Task with a per-task budget (no preset)
+curl -s -X POST $HOST/tasks \
+  -H "Authorization: Bearer $DEV_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "https://github.com/your-org/your-repo.git",
+    "prompt": "Add input validation to the /users endpoint and write tests",
+    "cost_budget_usd": 2.00,
+    "max_turns": 15
+  }' | jq .
+```
+
+The response includes a `budget_check` field showing the estimation result:
+
+```json
+{
+  "id": "task-a1b2c3d4",
+  "status": "queued",
+  "budget_check": {
+    "status": "passed",
+    "predicted_total_usd": 0.4860,
+    "max_budget_usd": 2.0,
+    "confidence": "high",
+    "mode": "static"
+  }
+}
+```
+
+The `budget_check.status` tells you what happened:
+
+| `status` | Meaning | What to do |
+|----------|---------|------------|
+| `passed` | Predicted cost is under budget | Nothing — task is running |
+| `warning` | Predicted cost exceeds budget, but policy says proceed | Review cost after completion |
+| `requires_approval` | Task is blocked until a human approves | Approve or reject the budget gate (see below) |
+| `rejected` | Task was not created (HTTP 422) | Lower `max_turns`, use a cheaper model, or increase the budget |
+
+### Outcome: `passed`
+
+The task proceeds normally. The `budget_check` is stored and visible in `GET /tasks/{id}`:
+
+```bash
+curl -s $HOST/tasks/task-a1b2c3d4 \
+  -H "Authorization: Bearer $DEV_TOKEN" | jq .budget_check
+```
+
+### Outcome: `rejected` (HTTP 422)
+
+The task is never created. The response body tells you why:
+
+```bash
+curl -s -X POST $HOST/tasks \
+  -H "Authorization: Bearer $DEV_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "https://github.com/your-org/your-repo.git",
+    "prompt": "Refactor the entire codebase to use async/await",
+    "cost_budget_usd": 0.50,
+    "model": "claude-opus-4-6",
+    "max_turns": 100
+  }'
+```
+
+```json
+{
+  "detail": {
+    "error": "predicted budget exceeds budget cap",
+    "budget_check": {
+      "status": "rejected",
+      "predicted_total_usd": 54.0000,
+      "max_budget_usd": 0.5,
+      "confidence": "low",
+      "message": "Predicted cost $54.0000 exceeds budget $0.50"
+    }
+  }
+}
+```
+
+To unblock: reduce `max_turns`, switch to a cheaper model (e.g., `claude-sonnet-4-5` instead of `claude-opus-4-6`), increase `cost_budget_usd`, or simplify the prompt.
+
+### Outcome: `requires_approval`
+
+The task is created but blocked. No execution starts until a human approves.
+
+```bash
+# Submit against a preset with budget_fail_policy: require_approval
+curl -s -X POST $HOST/tasks \
+  -H "Authorization: Bearer $DEV_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "https://github.com/your-org/your-repo.git",
+    "prompt": "Migrate the database schema from v2 to v3",
+    "policy_preset": "team-reviewed",
+    "model": "claude-opus-4-6",
+    "max_turns": 50
+  }' | jq .
+```
+
+```json
+{
+  "id": "task-x9y8z7w6",
+  "status": "pending_approval",
+  "requires_approval": 1,
+  "budget_check": {
+    "status": "requires_approval",
+    "predicted_total_usd": 27.0000,
+    "max_budget_usd": 5.0,
+    "message": "Predicted cost $27.0000 exceeds budget $5.00 — approval required"
+  }
+}
+```
+
+**Approve the budget gate** (requires `tasks:approve` scope):
+
+```bash
+curl -s -X POST $HOST/tasks/task-x9y8z7w6/approve/budget_exceeded \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "One-time migration, cost is acceptable"}' | jq .
+# {"status": "approved", "execution": "resumed"}
+```
+
+The task transitions to `queued` and execution begins. Any post-execution gates (like `create_pr`) are created at this point.
+
+**Reject the budget gate:**
+
+```bash
+curl -s -X POST $HOST/tasks/task-x9y8z7w6/reject/budget_exceeded \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Too expensive, break the task into smaller pieces"}' | jq .
+# {"status": "rejected"}
+```
+
+The task is marked as `failed` with `error: "budget_approval_rejected"`. No execution ever starts.
+
+### Budget gates in the approval UI
+
+When a budget-gated task is created, you can also manage it through the browser-based approval UI:
+
+1. **Generate an approval link:**
+   ```bash
+   curl -s -X POST $HOST/tasks/task-x9y8z7w6/approval-link/budget_exceeded \
+     -H "Authorization: Bearer $TOKEN" | jq .approval_url
+   ```
+   This returns a signed URL (valid for 1 hour) that you can share via Slack or email.
+
+2. **Open the link in a browser.** The approval page shows:
+   - The task prompt, model, and repo/branch context
+   - A **Budget Estimate** card with predicted cost, budget cap, confidence level, estimation mode, and the current gate decision
+   - The current gate status — this updates live, so if someone has already approved or rejected the gate, the page reflects that
+
+3. **Approve or reject** using your API token (the approval link grants view access only; the approve/reject action requires your own token entered in the UI).
+
+The budget card on the approval page always shows the **live gate status** (pending, approved, or rejected), not the stale admission-time decision.
+
+### Retry and budget control
+
+When you retry a task with `POST /tasks/{id}/retry`, the new task goes through the same pre-flight budget check. The retry inherits `cost_budget_usd` and `policy_preset` from the original task, so the same budget cap applies:
+
+```bash
+# Original task completed but needs follow-up
+curl -s -X POST $HOST/tasks/task-a1b2c3d4/retry \
+  -H "Authorization: Bearer $DEV_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Also add error handling for the edge cases"}' | jq .
+```
+
+If the retried task exceeds the budget, it is rejected or gated the same way as a fresh submission. There is no bypass.
+
+### Checking budget status after creation
+
+You can check a task's budget estimation at any time via `GET /tasks/{id}`:
+
+```bash
+curl -s $HOST/tasks/task-x9y8z7w6 \
+  -H "Authorization: Bearer $TOKEN" | jq .budget_check
+```
+
+The response includes a `gate_status` field showing the current state of the budget gate:
+
+```json
+{
+  "budget_check": {
+    "status": "requires_approval",
+    "predicted_total_usd": 27.0000,
+    "max_budget_usd": 5.0,
+    "gate_status": "approved"
+  }
+}
+```
+
+Here `status` is the original admission decision and `gate_status` is the current live state.
+
+---
+
 ## Tips
 
 - **Private repos:** Set `GIT_TOKEN` in `.env` on the server. For cloning, any HTTPS git host works (GitHub, GitLab, Bitbucket). For PR creation, only GitHub is supported (via `gh` CLI). Use a GitHub fine-grained PAT with Contents read/write + Pull requests read/write.
