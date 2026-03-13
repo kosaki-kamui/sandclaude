@@ -152,6 +152,7 @@ async def reject_action_endpoint(
             status=TaskStatus.failed,
             completed_at=datetime.now(timezone.utc).isoformat(),
             error="budget_approval_rejected",
+            error_category="approval_rejected",
             requires_approval=0,
         )
 

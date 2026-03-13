@@ -457,6 +457,7 @@ async def retry_task_endpoint(
         host_cwd=task.host_cwd,
         policy_preset=task.policy_preset,
         cost_budget_usd=task.cost_budget_usd,
+        parent_task_id=task.id,
     )
 
     from sandclaude.policy import create_required_gates, resolve_effective_policy
@@ -528,6 +529,37 @@ async def retry_task_endpoint(
     result = new_task.safe_dump()
     if budget_check:
         result["budget_check"] = budget_check
+    return result
+
+
+# ── v0.3.0: Task timeline ──────────────────────────────────────
+
+
+@router.get("/tasks/{task_id}/timeline")
+async def get_task_timeline_endpoint(
+    task_id: str, auth: AuthResult = Depends(_require_auth)
+) -> dict:
+    """Get phase breakdown and retry chain for a task."""
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, auth)
+
+    result: dict = {
+        "task_id": task.id,
+        "status": task.status.value,
+        "error_category": task.error_category,
+        "timeline": task._compute_timeline(),
+    }
+
+    # Include retry chain if this task has a parent or children
+    chain = await db.get_retry_chain(task_id)
+    if len(chain) > 1:
+        result["retry_chain"] = [
+            {"id": t.id, "status": t.status.value, "created_at": t.created_at} for t in chain
+        ]
+
     return result
 
 

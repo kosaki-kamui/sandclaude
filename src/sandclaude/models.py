@@ -166,6 +166,11 @@ class Task(BaseModel):
     cost_budget_usd: float | None = None
     budget_check_json: str | None = None  # JSON-encoded budget_check from admission
     created_by_user_id: int | None = None  # v0.3.0: user who created this task
+    # v0.3.0: Observability
+    setup_completed_at: str | None = None
+    agent_started_at: str | None = None
+    error_category: str | None = None
+    parent_task_id: str | None = None
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""
@@ -185,7 +190,41 @@ class Task(BaseModel):
             if len(err) > 500:
                 err = err[:500] + "..."
             d["error"] = err
+        # Compute timeline from phase timestamps
+        d["timeline"] = self._compute_timeline()
         return d
+
+    def _compute_timeline(self) -> dict | None:
+        """Compute phase durations from timestamps."""
+        if not self.created_at:
+            return None
+        from datetime import datetime
+
+        def _parse(ts: str | None) -> datetime | None:
+            if not ts:
+                return None
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                return None
+
+        def _delta_s(start: datetime | None, end: datetime | None) -> float | None:
+            if start and end:
+                return round((end - start).total_seconds(), 1)
+            return None
+
+        created = _parse(self.created_at)
+        started = _parse(self.started_at)
+        setup_done = _parse(self.setup_completed_at)
+        agent_start = _parse(self.agent_started_at)
+        completed = _parse(self.completed_at)
+
+        return {
+            "queued_duration_s": _delta_s(created, started),
+            "setup_duration_s": _delta_s(started, setup_done),
+            "agent_duration_s": _delta_s(agent_start, completed),
+            "total_duration_s": _delta_s(created, completed),
+        }
 
 
 class AuditLog(BaseModel):

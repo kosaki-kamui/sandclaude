@@ -149,6 +149,16 @@ async def init_db() -> None:
         if "decided_by_user_id" not in gate_cols:
             await db.execute("ALTER TABLE approval_gates ADD COLUMN decided_by_user_id INTEGER")
 
+        # v0.3.0 observability migrations
+        for obs_col, obs_type in [
+            ("setup_completed_at", "TEXT"),
+            ("agent_started_at", "TEXT"),
+            ("error_category", "TEXT"),
+            ("parent_task_id", "TEXT"),
+        ]:
+            if obs_col not in task_cols_v3:
+                await db.execute(f"ALTER TABLE tasks ADD COLUMN {obs_col} {obs_type}")
+
         # v0.2.0: Policy presets
         await db.execute("""
             CREATE TABLE IF NOT EXISTS policy_presets (
@@ -192,6 +202,7 @@ async def create_task(
     declared_secrets: list[str] | None = None,
     cost_budget_usd: float | None = None,
     created_by_user_id: int | None = None,
+    parent_task_id: str | None = None,
 ) -> Task:
     now = datetime.now(timezone.utc).isoformat()
     allowed_domains_json = json.dumps(allowed_domains) if allowed_domains else None
@@ -203,8 +214,8 @@ async def create_task(
                (id, status, repo, branch, prompt, model, max_turns, priority,
                 owner_token_hash, host_cwd, allowed_domains, notify_webhook, notify_on,
                 policy_preset, declared_secrets, cost_budget_usd, created_by_user_id,
-                created_at)
-               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, created_at)
+               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 repo,
@@ -222,6 +233,7 @@ async def create_task(
                 declared_secrets_json,
                 cost_budget_usd,
                 created_by_user_id,
+                parent_task_id,
                 now,
             ),
         )
@@ -287,6 +299,9 @@ async def update_task(
     error: str | None = None,
     requires_approval: int | None = None,
     budget_check_json: str | None = None,
+    setup_completed_at: str | None = None,
+    agent_started_at: str | None = None,
+    error_category: str | None = None,
 ) -> None:
     sets: list[str] = []
     vals: list[object] = []
@@ -321,6 +336,15 @@ async def update_task(
     if budget_check_json is not None:
         sets.append("budget_check_json = ?")
         vals.append(budget_check_json)
+    if setup_completed_at is not None:
+        sets.append("setup_completed_at = ?")
+        vals.append(setup_completed_at)
+    if agent_started_at is not None:
+        sets.append("agent_started_at = ?")
+        vals.append(agent_started_at)
+    if error_category is not None:
+        sets.append("error_category = ?")
+        vals.append(error_category)
 
     if not sets:
         return
@@ -338,6 +362,7 @@ async def update_task_if_status(
     status: TaskStatus,
     completed_at: str | None = None,
     error: str | None = None,
+    error_category: str | None = None,
 ) -> bool:
     """Conditionally update a task only if its current status matches one of expected_statuses.
 
@@ -353,6 +378,9 @@ async def update_task_if_status(
     if error is not None:
         sets.append("error = ?")
         vals.append(error)
+    if error_category is not None:
+        sets.append("error_category = ?")
+        vals.append(error_category)
 
     expected_values = [s.value for s in expected_statuses]
     placeholders = ",".join("?" for _ in expected_values)
@@ -478,6 +506,10 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         cost_budget_usd=row["cost_budget_usd"] if "cost_budget_usd" in keys else None,
         budget_check_json=row["budget_check_json"] if "budget_check_json" in keys else None,
         created_by_user_id=row["created_by_user_id"] if "created_by_user_id" in keys else None,
+        setup_completed_at=row["setup_completed_at"] if "setup_completed_at" in keys else None,
+        agent_started_at=row["agent_started_at"] if "agent_started_at" in keys else None,
+        error_category=row["error_category"] if "error_category" in keys else None,
+        parent_task_id=row["parent_task_id"] if "parent_task_id" in keys else None,
     )
 
 
@@ -844,3 +876,118 @@ async def link_orphan_tokens_to_user(user_id: int) -> int:
         )
         await conn.commit()
         return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: Metrics & observability queries
+# ---------------------------------------------------------------------------
+
+
+async def get_task_metrics() -> dict:
+    """Aggregate task metrics for the /metrics endpoint."""
+    async with aiosqlite.connect(_db_path()) as conn:
+        # Status counts
+        cursor = await conn.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status")
+        by_status = {row[0]: row[1] for row in await cursor.fetchall()}
+        total = sum(by_status.values())
+
+        # Error category counts
+        cursor = await conn.execute(
+            "SELECT error_category, COUNT(*) FROM tasks "
+            "WHERE error_category IS NOT NULL GROUP BY error_category"
+        )
+        by_error = {row[0]: row[1] for row in await cursor.fetchall()}
+
+        # Cost and token aggregates
+        cursor = await conn.execute(
+            "SELECT SUM(total_cost_usd), SUM(tokens_input), SUM(tokens_output) FROM tasks"
+        )
+        row = await cursor.fetchone()
+        total_cost = (row[0] or 0.0) if row else 0.0
+        total_input = (row[1] or 0) if row else 0
+        total_output = (row[2] or 0) if row else 0
+
+        # Timing averages (only for completed tasks with both timestamps)
+        cursor = await conn.execute(
+            "SELECT AVG("
+            "  CAST((julianday(completed_at) - julianday(created_at)) * 86400 AS INTEGER)"
+            ") FROM tasks WHERE completed_at IS NOT NULL AND created_at IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        avg_total = row[0] if row else None
+
+        cursor = await conn.execute(
+            "SELECT AVG("
+            "  CAST((julianday(setup_completed_at) - julianday(started_at)) * 86400 AS INTEGER)"
+            ") FROM tasks WHERE setup_completed_at IS NOT NULL AND started_at IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        avg_setup = row[0] if row else None
+
+        cursor = await conn.execute(
+            "SELECT AVG("
+            "  CAST((julianday(completed_at) - julianday(agent_started_at)) * 86400 AS INTEGER)"
+            ") FROM tasks WHERE completed_at IS NOT NULL AND agent_started_at IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        avg_agent = row[0] if row else None
+
+        # Last 24 hours
+        cursor = await conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), "
+            "SUM(total_cost_usd) "
+            "FROM tasks WHERE created_at >= datetime('now', '-1 day')"
+        )
+        recent = await cursor.fetchone()
+        recent_count = recent[0] if recent else 0
+        recent_success = recent[1] if recent else 0
+        recent_cost = recent[2] if recent else 0.0
+
+        completed = by_status.get("completed", 0)
+        success_rate = round(completed / total, 2) if total > 0 else 0.0
+
+    return {
+        "tasks": {
+            "total": total,
+            "by_status": by_status,
+            "by_error_category": by_error,
+            "success_rate": success_rate,
+        },
+        "cost": {
+            "total_usd": round(total_cost, 4),
+            "avg_per_task_usd": round(total_cost / total, 4) if total > 0 else 0.0,
+        },
+        "tokens": {
+            "total_input": total_input,
+            "total_output": total_output,
+        },
+        "timing": {
+            "avg_total_duration_s": round(avg_total) if avg_total else None,
+            "avg_setup_duration_s": round(avg_setup) if avg_setup else None,
+            "avg_agent_duration_s": round(avg_agent) if avg_agent else None,
+        },
+        "recent_24h": {
+            "task_count": recent_count or 0,
+            "success_count": recent_success or 0,
+            "total_cost_usd": round(recent_cost or 0.0, 4),
+        },
+    }
+
+
+async def get_retry_chain(task_id: str) -> list[Task]:
+    """Follow parent_task_id links to build the retry chain (oldest first)."""
+    chain: list[Task] = []
+    current_id: str | None = task_id
+    seen: set[str] = set()
+
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        task = await get_task(current_id)
+        if not task:
+            break
+        chain.append(task)
+        current_id = task.parent_task_id
+
+    chain.reverse()  # oldest first
+    return chain

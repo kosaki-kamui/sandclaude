@@ -392,13 +392,18 @@ async def run_task_in_container(task: Task) -> dict:
                     logger.debug("Container logs:\n%s", log_text)
                 except Exception:
                     log_text = ""
+                await db.update_task(task.id, error_category="setup_failure")
                 raise RuntimeError(
                     f"Container exited during setup with code {exit_code}"
                     + (f"\n{log_text}" if log_text else "")
                 )
             if asyncio.get_running_loop().time() > setup_deadline:
+                await db.update_task(task.id, error_category="setup_timeout")
                 raise RuntimeError("Setup phase timed out after 5 minutes")
             await asyncio.sleep(0.5)
+
+        # Setup complete — record timestamp
+        await db.update_task(task.id, setup_completed_at=datetime.now(timezone.utc).isoformat())
 
         # Network switch
         await db.update_task(task.id, status=TaskStatus.running)
@@ -414,6 +419,8 @@ async def run_task_in_container(task: Task) -> dict:
                     "SKIP_NETWORK_ISOLATION=true is only allowed in development/test environments"
                 )
             logger.info("SKIP_NETWORK_ISOLATION=true, skipping network switch")
+
+        await db.update_task(task.id, agent_started_at=datetime.now(timezone.utc).isoformat())
 
         # Signal container to proceed to agent phase
         (output_dir / ".network-switched").write_text("")
@@ -488,6 +495,15 @@ async def run_task_in_container(task: Task) -> dict:
                     task.cost_budget_usd,
                 )
 
+            # Determine error_category for result-based failures
+            result_error_category = None
+            if (
+                task.cost_budget_usd is not None
+                and cost is not None
+                and cost > task.cost_budget_usd
+            ):
+                result_error_category = "cost_exceeded"
+
             await db.update_task(
                 task.id,
                 status=status,
@@ -496,6 +512,7 @@ async def run_task_in_container(task: Task) -> dict:
                 tokens_output=tokens_out,
                 total_cost_usd=cost,
                 error=error_str,
+                error_category=result_error_category,
             )
 
             # v0.3.0: Post-execution rule evaluation — auto-approve gates
@@ -557,6 +574,7 @@ async def run_task_in_container(task: Task) -> dict:
                 status=TaskStatus.failed,
                 completed_at=datetime.now(timezone.utc).isoformat(),
                 error=error,
+                error_category="container_error",
             )
             return {"success": False, "error": error}
 
@@ -569,6 +587,7 @@ async def run_task_in_container(task: Task) -> dict:
             status=TaskStatus.failed,
             completed_at=datetime.now(timezone.utc).isoformat(),
             error=error_msg,
+            error_category="agent_error",
         )
         return {"success": False, "error": error_msg}
 
