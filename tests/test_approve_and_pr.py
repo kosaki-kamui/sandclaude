@@ -102,7 +102,7 @@ class TestApprovalUIContext:
 
 
 class TestApproveAndCreatePR:
-    @patch("sandclaude.api.main.create_pr", new_callable=AsyncMock)
+    @patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock)
     async def test_pending_gate_approve_and_create(self, mock_pr, client: AsyncClient):
         """Pending gate -> approve + create PR succeeds."""
         mock_pr.return_value = {
@@ -127,7 +127,7 @@ class TestApproveAndCreatePR:
         assert gates[0].status == ApprovalStatus.approved
         assert gates[0].reason == "LGTM"
 
-    @patch("sandclaude.api.main.create_pr", new_callable=AsyncMock)
+    @patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock)
     async def test_already_approved_gate_creates_pr(self, mock_pr, client: AsyncClient):
         """Already approved gate -> skip approval, create PR."""
         mock_pr.return_value = {
@@ -180,7 +180,7 @@ class TestApproveAndCreatePR:
         )
         assert resp.status_code == 403
 
-    @patch("sandclaude.api.main.create_pr", new_callable=AsyncMock)
+    @patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock)
     async def test_no_gate_creates_pr_directly(self, mock_pr, client: AsyncClient):
         """No create_pr gate -> create PR directly."""
         mock_pr.return_value = {

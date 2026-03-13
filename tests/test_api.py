@@ -53,7 +53,7 @@ async def test_auth_required(client: AsyncClient):
     assert resp.status_code == 401
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_create_task(mock_submit, client: AsyncClient):
     resp = await client.post(
         "/tasks",
@@ -83,7 +83,7 @@ async def test_reject_relative_repo_path(client: AsyncClient):
     assert resp.status_code == 400
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_list_tasks(mock_submit, client: AsyncClient):
     await client.post("/tasks", json={"repo": ".", "prompt": "A"})
     await client.post("/tasks", json={"repo": ".", "prompt": "B"})
@@ -94,7 +94,7 @@ async def test_list_tasks(mock_submit, client: AsyncClient):
     assert len(tasks) == 2
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_task(mock_submit, client: AsyncClient):
     create_resp = await client.post("/tasks", json={"repo": ".", "prompt": "Test"})
     task_id = create_resp.json()["id"]
@@ -145,7 +145,7 @@ async def test_pool_stats(client: AsyncClient):
     assert "queued" in data
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_delete_task(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "delete me"})
     task_id = resp.json()["id"]
@@ -159,7 +159,7 @@ async def test_delete_task(mock_submit, client: AsyncClient):
     assert resp.status_code == 404
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_delete_running_task_blocked(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "running"})
     task_id = resp.json()["id"]
@@ -174,8 +174,8 @@ async def test_delete_running_task_blocked(mock_submit, client: AsyncClient):
     assert resp.status_code == 409
 
 
-@patch("sandclaude.api.main.cancel_container", new_callable=AsyncMock, return_value=True)
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.cancel_container", new_callable=AsyncMock, return_value=True)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_cancel_queued_task(mock_submit, mock_cancel, client: AsyncClient):
     """Cancel endpoint should succeed for a queued task."""
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "cancel me"})
@@ -186,7 +186,7 @@ async def test_cancel_queued_task(mock_submit, mock_cancel, client: AsyncClient)
     assert resp.json()["status"] == "cancelled"
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_cancel_completed_task_rejected(mock_submit, client: AsyncClient):
     """Cancel endpoint should return 400 for an already-completed task."""
     from sandclaude.db import store as db_mod
@@ -201,8 +201,8 @@ async def test_cancel_completed_task_rejected(mock_submit, client: AsyncClient):
     assert "Cannot cancel" in resp.json()["detail"]
 
 
-@patch("sandclaude.api.main.cancel_container", new_callable=AsyncMock, return_value=False)
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.cancel_container", new_callable=AsyncMock, return_value=False)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_cancel_race_returns_409(mock_submit, mock_cancel, client: AsyncClient):
     """If cancel loses a race (task completed concurrently), return 409 not 500."""
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "race"})
@@ -237,7 +237,7 @@ async def test_websocket_requires_auth():
                 pass
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_websocket_transcript_too_large_warning_then_done(mock_submit, client: AsyncClient):
     """WebSocket stream should emit a warning when transcript exceeds 10MB."""
     from starlette.testclient import TestClient
@@ -288,7 +288,7 @@ def _write_task_artifacts(data_dir, task_id):
     )
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_diff(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -302,7 +302,7 @@ async def test_get_diff(mock_submit, client: AsyncClient):
     assert "diff --git" in resp.text
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_diff_rejects_oversized_artifact(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -318,7 +318,7 @@ async def test_get_diff_rejects_oversized_artifact(mock_submit, client: AsyncCli
     assert resp.status_code == 413
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_audit(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -334,7 +334,7 @@ async def test_get_audit(mock_submit, client: AsyncClient):
     assert "files_written" in data
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_audit_rejects_malformed_json(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -349,7 +349,7 @@ async def test_get_audit_rejects_malformed_json(mock_submit, client: AsyncClient
     assert resp.status_code == 502
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_result(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -365,7 +365,7 @@ async def test_get_result(mock_submit, client: AsyncClient):
     assert data["num_turns"] == 3
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_transcript(mock_submit, client: AsyncClient):
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
     task_id = resp.json()["id"]
@@ -401,7 +401,7 @@ async def test_get_transcript_not_found(client: AsyncClient):
     assert resp.status_code == 404
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_get_artifacts_before_completion(mock_submit, client: AsyncClient):
     """Artifact endpoints return 404 if task exists but files don't yet."""
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "Fix it"})
@@ -421,7 +421,7 @@ async def test_reject_http_repo(client: AsyncClient):
     assert "http://" in resp.json()["detail"]
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_rate_limit_enforcement(mock_submit, client: AsyncClient):
     """Rate limiter should return 429 after exceeding the window."""
     from sandclaude.api.main import CREATE_RATE_LIMIT_MAX_REQUESTS, _create_rate_buckets
@@ -495,7 +495,7 @@ async def test_null_owner_hash_blocks_secondary_token(tmp_path):
     cfg.settings.auth_tokens = ""
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_cross_owner_denial(mock_submit, tmp_path):
     """Token A cannot access Token B's tasks."""
     import sandclaude.config as cfg
@@ -574,7 +574,7 @@ async def test_multi_token_auth_acceptance(tmp_path):
 # ── Create-PR endpoint tests ──────────────────────────────
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_create_pr_requires_completed_status(mock_submit, client: AsyncClient):
     """create-pr should reject tasks that aren't completed."""
     resp = await client.post("/tasks", json={"repo": ".", "prompt": "pr test"})
@@ -585,8 +585,8 @@ async def test_create_pr_requires_completed_status(mock_submit, client: AsyncCli
     assert "Cannot create PR" in resp.json()["detail"]
 
 
-@patch("sandclaude.api.main.create_pr", new_callable=AsyncMock)
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_create_pr_success(mock_submit, mock_create_pr, client: AsyncClient):
     """create-pr should succeed for completed tasks."""
     from sandclaude.db import store as db_mod
@@ -607,8 +607,8 @@ async def test_create_pr_success(mock_submit, mock_create_pr, client: AsyncClien
     assert resp.json()["url"] == "https://github.com/test/repo/pull/1"
 
 
-@patch("sandclaude.api.main.create_pr", new_callable=AsyncMock)
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_create_pr_error_sanitized(mock_submit, mock_create_pr, client: AsyncClient):
     """create-pr errors should have paths sanitized."""
     from sandclaude.db import store as db_mod
@@ -625,7 +625,7 @@ async def test_create_pr_error_sanitized(mock_submit, mock_create_pr, client: As
     assert "/home/user/secret" not in resp.json()["detail"]
 
 
-@patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+@patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
 async def test_task_error_sanitized_in_response(mock_submit, client: AsyncClient):
     """Task error field should have paths stripped in API responses."""
     from sandclaude.db import store as db_mod

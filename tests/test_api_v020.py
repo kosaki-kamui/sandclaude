@@ -249,7 +249,7 @@ class TestApprovalLinks:
 
 
 class TestRetryEndpoint:
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_retry_creates_follow_up(self, mock_submit, client: AsyncClient):
         task = await db.create_task(
             task_id="task-retry-api",
@@ -301,7 +301,7 @@ class TestBundleEndpoint:
 
 
 class TestRepoBranchPolicyAtCreation:
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_blocked_repo_rejected(self, mock_submit, client: AsyncClient):
         # Create a preset that restricts repos
         await client.put(
@@ -323,7 +323,7 @@ class TestRepoBranchPolicyAtCreation:
         assert "not in the allowed repos" in resp.json()["detail"]
         mock_submit.assert_not_called()
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_blocked_branch_rejected(self, mock_submit, client: AsyncClient):
         await client.put(
             "/policies/branch-restricted",
@@ -345,7 +345,7 @@ class TestRepoBranchPolicyAtCreation:
         assert "blocked" in resp.json()["detail"]
         mock_submit.assert_not_called()
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_allowed_repo_and_branch_accepted(self, mock_submit, client: AsyncClient):
         await client.put(
             "/policies/permissive",

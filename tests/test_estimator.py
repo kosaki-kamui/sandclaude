@@ -225,7 +225,7 @@ class TestBudgetGateAPI:
             c.headers["Authorization"] = f"Bearer {token}"
             yield c
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_task_with_budget_includes_check(self, mock_submit, client):
         resp = await client.post(
             "/tasks",
@@ -241,7 +241,7 @@ class TestBudgetGateAPI:
         assert "budget_check" in data
         assert data["budget_check"]["status"] == "passed"
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_task_without_budget_no_check(self, mock_submit, client):
         resp = await client.post(
             "/tasks",
@@ -265,7 +265,7 @@ class TestBudgetGateAPI:
         detail = resp.json()["detail"]
         assert detail["budget_check"]["status"] == "rejected"
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_require_approval_blocks_execution(self, mock_submit, client):
         """require_approval must NOT call submit_task."""
         # Create a preset with require_approval policy and a tiny budget
@@ -292,7 +292,7 @@ class TestBudgetGateAPI:
         # Task must NOT have been submitted for execution
         mock_submit.assert_not_called()
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_preset_budget_enforced_without_task_budget(self, mock_submit, client):
         """Preset max_cost_usd must trigger estimation even if task omits cost_budget_usd."""
         await client.put(
@@ -316,7 +316,7 @@ class TestBudgetGateAPI:
         assert resp.status_code == 422
         mock_submit.assert_not_called()
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_task_cannot_widen_budget_above_preset(self, mock_submit, client):
         """Task cost_budget_usd=100 must be capped by preset max_cost_usd=0.001."""
         await client.put(
@@ -341,7 +341,7 @@ class TestBudgetGateAPI:
         assert resp.status_code == 422
         mock_submit.assert_not_called()
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.approvals.submit_task", new_callable=AsyncMock)
     async def test_budget_approval_resumes_execution(self, mock_submit, client):
         """Approving budget_exceeded gate must transition task to queued and submit."""
         await client.put(
@@ -381,7 +381,7 @@ class TestBudgetGateAPI:
         task = await _db.get_task(task_id)
         assert task.status.value == "queued"
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_budget_response_reflects_pending_approval(self, mock_submit, client):
         """Task creation response must show pending_approval, not stale queued."""
         await client.put(
@@ -407,7 +407,7 @@ class TestBudgetGateAPI:
         assert data["status"] == "pending_approval"
         assert data["requires_approval"] == 1
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_budget_rejection_fails_task(self, mock_submit, client):
         """Rejecting budget_exceeded must mark task as failed, not leave it stuck."""
         await client.put(
@@ -513,7 +513,7 @@ class TestBudgetCheckPersistence:
 
     # -- 1. POST /tasks persists budget_check_json -------------------------
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_post_tasks_persists_budget_check_json(self, mock_submit, client):
         """POST /tasks with a budget must store budget_check_json in the DB."""
         resp = await client.post(
@@ -539,7 +539,7 @@ class TestBudgetCheckPersistence:
         assert "predicted_total_usd" in stored
         assert "max_budget_usd" in stored
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_post_tasks_no_budget_no_json(self, mock_submit, client):
         """POST /tasks without a budget must NOT store budget_check_json."""
         resp = await client.post(
@@ -556,7 +556,7 @@ class TestBudgetCheckPersistence:
 
     # -- 2. POST /tasks/{id}/retry persists budget_check_json ---------------
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_retry_persists_budget_check_json(self, mock_submit, client):
         """Retry with a budget must store budget_check_json on the new task."""
         from sandclaude.auth import get_token, token_fingerprint
@@ -591,7 +591,7 @@ class TestBudgetCheckPersistence:
 
     # -- 3. GET /tasks/{id} returns budget data from stored JSON ------------
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_get_task_returns_stored_budget_check(self, mock_submit, client):
         """GET /tasks/{id} must return budget_check from stored JSON, not recomputed."""
         await client.put(
@@ -624,7 +624,7 @@ class TestBudgetCheckPersistence:
 
     # -- 4. Approval UI renders budget data from stored JSON ----------------
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_approval_ui_renders_stored_budget(self, mock_submit, client):
         """Approval UI must render budget card from stored budget_check_json."""
         await client.put(
@@ -748,7 +748,7 @@ class TestBudgetCheckPersistence:
 
     # -- 6. Approval UI shows live gate status, not stale decision ----------
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.approvals.submit_task", new_callable=AsyncMock)
     async def test_approval_ui_shows_live_approved_status(self, mock_submit, client):
         """After approving a budget gate, the UI must show 'approved', not 'requires_approval'."""
         await client.put(
@@ -794,7 +794,7 @@ class TestBudgetCheckPersistence:
         # Should NOT contain the stale admission-time status
         assert "requires_approval" not in html
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.approvals.submit_task", new_callable=AsyncMock)
     async def test_get_task_shows_live_gate_status_after_approval(self, mock_submit, client):
         """GET /tasks/{id} budget_check.gate_status must reflect live gate state."""
         await client.put(
@@ -827,7 +827,7 @@ class TestBudgetCheckPersistence:
         get2 = await client.get(f"/tasks/{task_id}")
         assert get2.json()["budget_check"]["gate_status"] == "approved"
 
-    @patch("sandclaude.api.main.submit_task", new_callable=AsyncMock)
+    @patch("sandclaude.api.tasks.submit_task", new_callable=AsyncMock)
     async def test_get_task_shows_rejected_gate_status(self, mock_submit, client):
         """GET /tasks/{id} budget_check.gate_status must show 'rejected' after rejection."""
         await client.put(
