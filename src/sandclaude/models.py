@@ -340,6 +340,8 @@ class PolicyPresetConfig(BaseModel):
     pr_only: bool = False  # if True, direct push is blocked (only PRs allowed)
     # v0.2.5: Budget admission control
     budget_fail_policy: str | None = None  # "reject", "warn", "require_approval"
+    # v0.3.0: Rule-based approval conditions
+    approval_rules: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------

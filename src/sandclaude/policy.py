@@ -159,19 +159,204 @@ async def resolve_effective_policy(task: Task) -> PolicyPresetConfig:
     return PolicyPresetConfig(**effective)
 
 
-async def create_required_gates(task_id: str, policy: PolicyPresetConfig) -> int:
+def evaluate_approval_rules(
+    rules: list[dict[str, Any]],
+    action: str,
+    *,
+    risk_level: str | None = None,
+    predicted_cost: float | None = None,
+    has_secrets: bool = False,
+    repo: str = "",
+    preset_name: str | None = None,
+) -> str | None:
+    """Evaluate approval rules for an action. First matching rule wins.
+
+    Returns "auto_approve", "require_approval", or None (no match).
+    """
+    for rule in rules:
+        rule_action = rule.get("action", "")
+        if rule_action != "*" and rule_action != action:
+            continue
+
+        when = rule.get("when", {})
+        if not _predicates_match(
+            when,
+            risk_level=risk_level,
+            predicted_cost=predicted_cost,
+            has_secrets=has_secrets,
+            repo=repo,
+            preset_name=preset_name,
+        ):
+            continue
+
+        condition = rule.get("condition")
+        if condition in ("auto_approve", "require_approval"):
+            return condition
+
+    return None
+
+
+def _predicates_match(
+    when: dict[str, Any],
+    *,
+    risk_level: str | None = None,
+    predicted_cost: float | None = None,
+    has_secrets: bool = False,
+    repo: str = "",
+    preset_name: str | None = None,
+) -> bool:
+    """Check if all predicates in a 'when' dict match. All must match (AND)."""
+    for key, value in when.items():
+        if key == "risk_level":
+            if risk_level is None:
+                return False  # can't evaluate without risk data
+            if isinstance(value, list):
+                if risk_level not in value:
+                    return False
+            elif risk_level != value:
+                return False
+
+        elif key == "predicted_cost_below":
+            if predicted_cost is None:
+                return False
+            if predicted_cost >= value:
+                return False
+
+        elif key == "has_secrets":
+            if has_secrets != value:
+                return False
+
+        elif key == "repo_matches":
+            if not repo.startswith(value):
+                return False
+
+        elif key == "preset":
+            if preset_name != value:
+                return False
+
+        else:
+            # Unknown predicate — skip (don't block)
+            logger.warning("Unknown approval rule predicate: %s", key)
+
+    return True
+
+
+async def create_required_gates(
+    task_id: str,
+    policy: PolicyPresetConfig,
+    *,
+    risk_level: str | None = None,
+    predicted_cost: float | None = None,
+    has_secrets: bool = False,
+    repo: str = "",
+    preset_name: str | None = None,
+) -> int:
     """Create approval gates for actions that require approval per the policy.
 
-    Returns the number of gates created.
+    If the policy has approval_rules, evaluates them first. Rules can
+    auto-approve (skip gate) or force approval. Falls back to the static
+    requires_approval_for list for unmatched actions.
+
+    Returns the number of pending gates created.
     """
     actions = policy.requires_approval_for or []
+    rules = policy.approval_rules or []
     count = 0
+
     for action in actions:
+        if rules:
+            decision = evaluate_approval_rules(
+                rules,
+                action,
+                risk_level=risk_level,
+                predicted_cost=predicted_cost,
+                has_secrets=has_secrets,
+                repo=repo,
+                preset_name=preset_name,
+            )
+            if decision == "auto_approve":
+                # Create gate as already-approved
+                await db.create_approval_gate(task_id, action)
+                from sandclaude.models import ApprovalStatus
+
+                await db.decide_approval_gate(
+                    task_id,
+                    action,
+                    decision=ApprovalStatus.approved,
+                    decided_by="system:auto_approve",
+                    reason="Auto-approved by policy rule",
+                )
+                logger.info("Auto-approved gate '%s' for task %s", action, task_id)
+                continue
+
+        # Default: create pending gate
         await db.create_approval_gate(task_id, action)
         count += 1
+
     if count > 0:
         await db.update_task(task_id, requires_approval=1)
     return count
+
+
+async def evaluate_post_execution_rules(
+    task_id: str,
+    policy: PolicyPresetConfig,
+    *,
+    risk_level: str | None = None,
+    predicted_cost: float | None = None,
+    has_secrets: bool = False,
+    repo: str = "",
+    preset_name: str | None = None,
+) -> int:
+    """Re-evaluate approval rules after execution with full context (including risk).
+
+    Auto-approves any pending gates that now match auto_approve rules.
+    Returns number of gates auto-approved.
+    """
+    rules = policy.approval_rules
+    if not rules:
+        return 0
+
+    gates = await db.get_approval_gates(task_id)
+    auto_approved = 0
+
+    for gate in gates:
+        if gate.status.value != "pending":
+            continue
+
+        decision = evaluate_approval_rules(
+            rules,
+            gate.action,
+            risk_level=risk_level,
+            predicted_cost=predicted_cost,
+            has_secrets=has_secrets,
+            repo=repo,
+            preset_name=preset_name,
+        )
+        if decision == "auto_approve":
+            from sandclaude.models import ApprovalStatus
+
+            await db.decide_approval_gate(
+                task_id,
+                gate.action,
+                decision=ApprovalStatus.approved,
+                decided_by="system:auto_approve",
+                reason=f"Auto-approved after execution (risk={risk_level})",
+            )
+            auto_approved += 1
+            logger.info(
+                "Post-execution auto-approved gate '%s' for task %s (risk=%s)",
+                gate.action,
+                task_id,
+                risk_level,
+            )
+
+    if auto_approved > 0:
+        # Check if all gates are now decided
+        if not await db.has_pending_gates(task_id):
+            await db.update_task(task_id, requires_approval=0)
+
+    return auto_approved
 
 
 def check_secret_allowed(policy: PolicyPresetConfig, secret_name: str) -> bool:

@@ -497,6 +497,56 @@ async def run_task_in_container(task: Task) -> dict:
                 total_cost_usd=cost,
                 error=error_str,
             )
+
+            # v0.3.0: Post-execution rule evaluation — auto-approve gates
+            # if risk is now known and matches auto_approve rules
+            try:
+                from sandclaude.policy import (
+                    evaluate_post_execution_rules,
+                    resolve_effective_policy,
+                )
+
+                eff_policy = await resolve_effective_policy(task)
+                if eff_policy.approval_rules:
+                    risk_level = None
+                    diff_path = output_dir / "diff.patch"
+                    audit_path = output_dir / "audit.json"
+                    if diff_path.exists() and audit_path.exists():
+                        from sandclaude.risk import generate_risk_summary
+
+                        diff_text = diff_path.read_text()
+                        audit_data = json.loads(audit_path.read_text())
+                        risk = generate_risk_summary(
+                            diff_text,
+                            audit_data,
+                            tokens_input=tokens_in or 0,
+                            tokens_output=tokens_out or 0,
+                            cost_usd=cost or 0.0,
+                        )
+                        risk_level = risk.risk_level
+
+                    auto_count = await evaluate_post_execution_rules(
+                        task.id,
+                        eff_policy,
+                        risk_level=risk_level,
+                        predicted_cost=cost,
+                        has_secrets=bool(task.declared_secrets),
+                        repo=task.repo,
+                        preset_name=task.policy_preset,
+                    )
+                    if auto_count:
+                        logger.info(
+                            "Task %s: %d gate(s) auto-approved post-execution",
+                            task.id,
+                            auto_count,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "Post-execution rule evaluation failed for %s: %s",
+                    task.id,
+                    exc,
+                )
+
             return result_data
         else:
             error = f"Container exited with code {exit_code} without producing results"

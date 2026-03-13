@@ -169,10 +169,21 @@ async def create_task_endpoint(
     # Create post-execution approval gates (e.g. create_pr) now that
     # the budget check has passed. These gates fire after execution,
     # not before, so they don't block task submission.
-    await create_required_gates(task_id, policy)
+    has_secrets = bool(request.declared_secrets)
+    cost_est = budget_check.get("predicted_total_usd") if budget_check else None
+    await create_required_gates(
+        task_id,
+        policy,
+        predicted_cost=cost_est,
+        has_secrets=has_secrets,
+        repo=request.repo,
+        preset_name=request.policy_preset,
+    )
 
     await submit_task(task)
-    result = task.safe_dump()
+    # Re-fetch to reflect any requires_approval changes from gate creation
+    fresh = await db.get_task(task_id)
+    result = fresh.safe_dump() if fresh else task.safe_dump()
     if budget_check:
         result["budget_check"] = budget_check
     return result
@@ -503,7 +514,15 @@ async def retry_task_endpoint(
             result["budget_check"] = budget_check
             return result
 
-    await create_required_gates(new_task_id, policy)
+    retry_cost = budget_check.get("predicted_total_usd") if budget_check else None
+    await create_required_gates(
+        new_task_id,
+        policy,
+        predicted_cost=retry_cost,
+        has_secrets=bool(task.declared_secrets),
+        repo=task.repo,
+        preset_name=task.policy_preset,
+    )
 
     await submit_task(new_task)
     result = new_task.safe_dump()
