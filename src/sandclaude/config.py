@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     # v0.3.0: GitHub OAuth for approval UI (optional)
     github_client_id: str = ""
     github_client_secret: str = ""
+    # v0.3.0: Egress allowlist refresh interval (seconds, 0 = disabled)
+    egress_refresh_interval_s: int = 300
 
     @field_validator("task_timeout_s")
     @classmethod

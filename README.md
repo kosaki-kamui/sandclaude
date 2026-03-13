@@ -124,7 +124,7 @@ Every task runs in two phases inside a Docker container:
 1. **Setup Phase** - full internet access to clone the repo
 2. **Agent Phase** - network restricted to `api.anthropic.com` + configurable `allowed_domains` (e.g., package registries). Claude determines and installs dependencies itself. All other outbound traffic, ICMP, and IPv6 are blocked via in-container iptables rules
 
-> **Note on IP resolution:** Allowed domains are resolved to IP addresses on the host *before* the agent phase begins, and static iptables rules are written for those IPs. If a domain uses CDN/IP rotation, the resolved IPs may go stale during long-running tasks. This rarely affects typical tasks (which complete in minutes), but may cause intermittent connectivity for very long tasks against domains with aggressive IP rotation. An ipset refresh strategy is planned for a future release.
+> **IP resolution and refresh:** Allowed domains are resolved to IP addresses on the host before the agent phase begins, and iptables rules are written for those IPs. For long-running tasks (timeout >= `EGRESS_REFRESH_INTERVAL_S`, default 5 min), sandclaude periodically re-resolves domains and appends newly discovered IPs to the firewall rules without disrupting in-flight connections. All new IPs pass the same public-IP validation as the initial resolution. Short tasks skip refresh (overhead outweighs benefit). Set `EGRESS_REFRESH_INTERVAL_S=0` to disable refresh entirely.
 
 ## Quick Start
 

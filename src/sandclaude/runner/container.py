@@ -19,6 +19,7 @@ Container lifecycle:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -402,9 +403,10 @@ async def run_task_in_container(task: Task) -> dict:
         # Network switch
         await db.update_task(task.id, status=TaskStatus.running)
 
+        initial_ips: set[str] = set()
         if not settings.skip_network_isolation:
             # Reuse the domains resolved at container creation (avoid double DNS lookup)
-            await _switch_to_agent_network(client, container, all_allowed)
+            initial_ips = await _switch_to_agent_network(client, container, all_allowed)
         else:
             current_env = settings.environment.strip().lower()
             if current_env not in {"dev", "development", "test"}:
@@ -416,8 +418,31 @@ async def run_task_in_container(task: Task) -> dict:
         # Signal container to proceed to agent phase
         (output_dir / ".network-switched").write_text("")
 
-        # Wait for container to finish
-        result = await asyncio.to_thread(container.wait, timeout=settings.task_timeout_s)
+        # Wait for container to finish, with optional egress refresh
+        should_refresh = (
+            not settings.skip_network_isolation
+            and settings.egress_refresh_interval_s > 0
+            and settings.task_timeout_s >= settings.egress_refresh_interval_s
+            and len(all_allowed) > 0
+        )
+
+        if should_refresh:
+            refresh_task = asyncio.create_task(
+                _refresh_egress_loop(
+                    container,
+                    all_allowed,
+                    set(initial_ips),
+                    settings.egress_refresh_interval_s,
+                )
+            )
+            try:
+                result = await asyncio.to_thread(container.wait, timeout=settings.task_timeout_s)
+            finally:
+                refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await refresh_task
+        else:
+            result = await asyncio.to_thread(container.wait, timeout=settings.task_timeout_s)
         exit_code = result.get("StatusCode", -1)
 
         # Collect results (S15: validate values from container)
@@ -540,7 +565,7 @@ async def _switch_to_agent_network(
     client: docker.DockerClient,
     container: docker.models.containers.Container,
     allowed_domains: list[str],
-) -> None:
+) -> set[str]:
     """
     Apply iptables rules, THEN disconnect from setup-net and connect to agent-net.
 
@@ -611,6 +636,77 @@ async def _switch_to_agent_network(
 
     await asyncio.to_thread(setup_net.disconnect, container)
     await asyncio.to_thread(agent_net.connect, container)
+
+    return set(validated_ips)
+
+
+async def _refresh_egress_loop(
+    container: docker.models.containers.Container,
+    allowed_domains: list[str],
+    known_ips: set[str],
+    interval_s: int,
+) -> None:
+    """Periodically re-resolve allowed domains and append new IPs to iptables.
+
+    Runs as a concurrent asyncio task alongside container.wait(). Cancelled
+    when the container exits. New IPs go through the same public-IP validation
+    as the initial resolution.
+    """
+    while True:
+        await asyncio.sleep(interval_s)
+
+        new_ips: set[str] = set()
+        for domain in allowed_domains:
+            try:
+                resolved = await asyncio.to_thread(_resolve_and_validate_domain, domain)
+                domain_new = set(resolved) - known_ips
+                if domain_new:
+                    new_ips.update(domain_new)
+                    logger.info(
+                        "Egress refresh: %d new IP(s) for %s: %s",
+                        len(domain_new),
+                        domain,
+                        ", ".join(sorted(domain_new)),
+                    )
+            except RuntimeError as exc:
+                logger.warning("Egress refresh: DNS failed for %s: %s", domain, exc)
+            except Exception as exc:
+                logger.warning("Egress refresh: unexpected error for %s: %s", domain, exc)
+
+        if not new_ips:
+            continue
+
+        # Build iptables update script: remove DROP rules, append new IPs, re-add DROPs
+        _IPV4_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+        parts = [
+            "set -e",
+            "iptables -D OUTPUT -p icmp -j DROP",
+            "iptables -D OUTPUT -j DROP",
+        ]
+        for ip in sorted(new_ips):
+            if not _IPV4_RE.match(ip):
+                continue
+            parts.append(f"iptables -A OUTPUT -d {shlex.quote(ip)} -p tcp --dport 443 -j ACCEPT")
+        parts.append("iptables -A OUTPUT -p icmp -j DROP")
+        parts.append("iptables -A OUTPUT -j DROP")
+        script = " && ".join(parts)
+
+        try:
+            exit_code, output = await asyncio.to_thread(
+                container.exec_run, ["sh", "-c", script], user="root"
+            )
+            if exit_code != 0:
+                logger.error(
+                    "Egress refresh: iptables update failed (exit %d): %s",
+                    exit_code,
+                    output.decode()[:200],
+                )
+                break  # Container may be dead
+        except Exception as exc:
+            logger.error("Egress refresh: exec failed: %s", exc)
+            break
+
+        known_ips.update(new_ips)
 
 
 async def cancel_container(task: Task) -> bool:
