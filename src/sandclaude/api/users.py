@@ -61,10 +61,8 @@ async def delete_user_endpoint(user_id: int, auth: AuthResult = Depends(_require
     # Revoke all tokens belonging to this user
     tokens = await db.list_tokens()
     for t in tokens:
-        keys = t.keys() if hasattr(t, "keys") else []
-        user_id_val = t["user_id"] if "user_id" in keys else None
-        if user_id_val == user_id:
-            await db.revoke_token(t["id"])
+        if t.user_id == user_id:
+            await db.revoke_token(t.id)
 
     deleted = await db.delete_user(user_id)
     if not deleted:

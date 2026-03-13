@@ -38,6 +38,10 @@ class AuthResult:
     is_legacy: bool  # True for primary/.env tokens (admin-scoped)
     scopes: list[str]  # empty for legacy (= all scopes)
     token_name: str | None = None  # name from registry, None for legacy
+    # v0.3.0: User identity (populated from token → user lookup)
+    user_id: int | None = None
+    username: str | None = None
+    display_name: str | None = None
 
     def has_scope(self, scope: str) -> bool:
         """Check if this auth result grants the given scope.
@@ -142,11 +146,22 @@ async def verify_token_with_scopes(provided: str) -> AuthResult:
         # Do NOT break
 
     if legacy_match:
+        # v0.3.0: Resolve legacy tokens to the bootstrap admin user
+        admin = None
+        try:
+            from sandclaude.db import store as db
+
+            admin = await db.get_user_by_username("admin")
+        except Exception:
+            pass  # DB not initialized yet (e.g., during tests)
         return AuthResult(
             token=provided,
             fingerprint=token_fingerprint(provided),
             is_legacy=True,
             scopes=[],
+            user_id=admin.id if admin else None,
+            username=admin.username if admin else None,
+            display_name=admin.display_name if admin else None,
         )
 
     # Phase 2: Check registry tokens
@@ -162,12 +177,25 @@ async def verify_token_with_scopes(provided: str) -> AuthResult:
         detail = "Token revoked" if token_info.revoked_at else "Token expired"
         raise HTTPException(status_code=401, detail=detail)
 
+    # v0.3.0: Resolve token to its owning user
+    user_id = token_info.user_id
+    username = None
+    display_name = None
+    if user_id is not None:
+        user = await db.get_user(user_id)
+        if user:
+            username = user.username
+            display_name = user.display_name
+
     return AuthResult(
         token=provided,
         fingerprint=fp,
         is_legacy=False,
         scopes=token_info.scopes,
         token_name=token_info.name,
+        user_id=user_id,
+        username=username,
+        display_name=display_name,
     )
 
 

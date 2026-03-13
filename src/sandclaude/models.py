@@ -261,6 +261,7 @@ class TokenInfo(BaseModel):
     expires_at: str | None = None
     revoked_at: str | None = None
     created_by: str | None = None
+    user_id: int | None = None  # v0.3.0: owning user
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.scopes or "admin:*" in self.scopes

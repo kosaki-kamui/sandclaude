@@ -618,6 +618,7 @@ async def revoke_token(token_id: int) -> bool:
 
 def _row_to_token(row: aiosqlite.Row) -> TokenInfo:
     scopes = json.loads(row["scopes"]) if row["scopes"] else []
+    keys = row.keys() if hasattr(row, "keys") else []
     return TokenInfo(
         id=row["id"],
         name=row["name"],
@@ -627,6 +628,7 @@ def _row_to_token(row: aiosqlite.Row) -> TokenInfo:
         expires_at=row["expires_at"],
         revoked_at=row["revoked_at"],
         created_by=row["created_by"],
+        user_id=row["user_id"] if "user_id" in keys else None,
     )
 
 
@@ -762,6 +764,7 @@ async def create_user(
         )
         await conn.commit()
         user_id = cursor.lastrowid
+    assert user_id is not None
     user = await get_user(user_id)
     if user is None:
         raise RuntimeError(f"Failed to read back user {user_id} after creation")

@@ -39,6 +39,34 @@ __all__ = ["app", "CREATE_RATE_LIMIT_MAX_REQUESTS", "_create_rate_buckets"]
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_admin_user():
+    """Ensure the bootstrap admin user exists and is linked to the primary token."""
+
+    admin = await db.get_user_by_username("admin")
+    if admin:
+        # Link any orphan tokens (e.g., created before users table existed)
+        linked = await db.link_orphan_tokens_to_user(admin.id)
+        if linked:
+            logger.info("Linked %d orphan token(s) to admin user", linked)
+        return admin
+
+    # Create admin user (self-referential created_by set after)
+    admin = await db.create_user(
+        username="admin",
+        display_name="Admin",
+        is_service_account=False,
+        created_by_user_id=None,
+    )
+    await db.update_user(admin.id, created_by_user_id=admin.id)
+
+    # Link any existing registry tokens to the admin
+    linked = await db.link_orphan_tokens_to_user(admin.id)
+    if linked:
+        logger.info("Linked %d existing token(s) to admin user", linked)
+
+    return admin
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup: init DB, auth, recover orphans."""
@@ -58,6 +86,9 @@ async def lifespan(application: FastAPI):
     seeded = await seed_builtin_presets()
     if seeded:
         logger.info("Seeded %d built-in policy preset(s)", seeded)
+    # v0.3.0: Ensure the bootstrap admin user exists
+    admin = await _ensure_admin_user()
+    logger.info("Admin user: %s (id=%d)", admin.username, admin.id)
     logger.info("Data directory: %s", settings.data_dir.resolve())
     # Block multi-worker startup — pool and rate limit state is process-local.
     # Check both WEB_CONCURRENCY env var and uvicorn --workers CLI arg.
