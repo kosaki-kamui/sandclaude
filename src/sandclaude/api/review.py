@@ -15,6 +15,7 @@ from sandclaude.api.deps import (
     _sanitize_error,
     _validate_task_id,
 )
+from sandclaude.auth import AuthResult
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import TaskStatus
@@ -26,13 +27,15 @@ router = APIRouter()
 
 
 @router.get("/tasks/{task_id}/risk")
-async def get_risk_summary_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def get_risk_summary_endpoint(
+    task_id: str, auth: AuthResult = Depends(_require_auth)
+) -> dict:
     """Get a structured risk assessment for a completed task."""
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
         raise HTTPException(
@@ -73,7 +76,7 @@ async def get_risk_summary_endpoint(task_id: str, token: str = Depends(_require_
 
 
 @router.post("/tasks/{task_id}/review")
-async def review_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def review_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
     """Use Claude to review a completed task's diff and produce a review report.
 
     Returns risks, missing tests, suspicious changes, and files
@@ -83,7 +86,7 @@ async def review_task_endpoint(task_id: str, token: str = Depends(_require_auth)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
         raise HTTPException(
@@ -180,11 +183,11 @@ async def _generate_ai_review(prompt: str, diff: str) -> dict:
 
 @router.get("/tasks/{task_id}/secrets")
 async def get_task_secrets_endpoint(
-    task_id: str, token: str = Depends(_require_auth)
+    task_id: str, auth: AuthResult = Depends(_require_auth)
 ) -> list[dict]:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
     return await db.get_task_secrets(task_id)

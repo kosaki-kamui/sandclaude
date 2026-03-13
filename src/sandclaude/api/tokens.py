@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from sandclaude.api.deps import _require_auth
 from sandclaude.auth import (
+    AuthResult,
     generate_token,
     require_scope,
     token_fingerprint,
-    verify_token_with_scopes,
 )
 from sandclaude.db import store as db
 from sandclaude.models import TokenCreateRequest, TokenCreateResponse
@@ -19,10 +19,9 @@ router = APIRouter()
 
 @router.post("/tokens", status_code=201)
 async def create_token_endpoint(
-    request: TokenCreateRequest, token: str = Depends(_require_auth)
+    request: TokenCreateRequest, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
     # Only admin-scoped tokens can create new tokens
-    auth = await verify_token_with_scopes(token)
     require_scope(auth, "admin:tokens")
 
     from datetime import datetime, timedelta, timezone
@@ -55,8 +54,7 @@ async def create_token_endpoint(
 
 
 @router.get("/tokens")
-async def list_tokens_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
-    auth = await verify_token_with_scopes(token)
+async def list_tokens_endpoint(auth: AuthResult = Depends(_require_auth)) -> list[dict]:
     require_scope(auth, "admin:tokens")
     tokens = await db.list_tokens()
     # Never return the token_hash in list responses
@@ -75,8 +73,7 @@ async def list_tokens_endpoint(token: str = Depends(_require_auth)) -> list[dict
 
 
 @router.post("/tokens/{token_id}/revoke")
-async def revoke_token_endpoint(token_id: int, token: str = Depends(_require_auth)) -> dict:
-    auth = await verify_token_with_scopes(token)
+async def revoke_token_endpoint(token_id: int, auth: AuthResult = Depends(_require_auth)) -> dict:
     require_scope(auth, "admin:tokens")
     ok = await db.revoke_token(token_id)
     if not ok:

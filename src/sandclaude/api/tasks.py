@@ -20,7 +20,7 @@ from sandclaude.api.deps import (
     _require_task_owner,
     _validate_task_id,
 )
-from sandclaude.auth import token_fingerprint, verify_token
+from sandclaude.auth import AuthResult, token_fingerprint, verify_token_with_scopes
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import (
@@ -41,9 +41,9 @@ router = APIRouter()
 
 @router.post("/tasks", status_code=201)
 async def create_task_endpoint(
-    request: TaskCreateRequest, token: str = Depends(_require_auth)
+    request: TaskCreateRequest, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
-    _check_create_rate_limit(token)
+    _check_create_rate_limit(auth)
 
     # Validate repo: must be ".", an absolute path, or a secure remote URL
     repo = request.repo
@@ -86,7 +86,7 @@ async def create_task_endpoint(
         model=request.model or "claude-sonnet-4-5",
         max_turns=request.max_turns or 50,
         priority=request.priority or TaskPriority.normal,
-        owner_token_hash=token_fingerprint(token),
+        owner_token_hash=auth.fingerprint,
         host_cwd=request.host_cwd,
         allowed_domains=request.allowed_domains,
         notify_webhook=request.notify.webhook if request.notify else None,
@@ -181,10 +181,10 @@ async def create_task_endpoint(
 
 
 @router.get("/tasks")
-async def list_tasks_endpoint(token: str = Depends(_require_auth)) -> list[dict]:
+async def list_tasks_endpoint(auth: AuthResult = Depends(_require_auth)) -> list[dict]:
     from sandclaude.auth import get_token
 
-    caller_fp = token_fingerprint(token)
+    caller_fp = auth.fingerprint
     # Primary token also sees legacy tasks with NULL owner_token_hash
     is_primary = caller_fp == token_fingerprint(get_token())
     tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
@@ -195,12 +195,12 @@ async def list_tasks_endpoint(token: str = Depends(_require_auth)) -> list[dict]
 
 
 @router.get("/tasks/{task_id}")
-async def get_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def get_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     result = task.safe_dump()  # S11: exclude internal fields
     task_dir = settings.data_dir / "tasks" / task.id
@@ -259,12 +259,12 @@ async def get_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -
 
 
 @router.get("/tasks/{task_id}/diff")
-async def get_diff_endpoint(task_id: str, token: str = Depends(_require_auth)):
+async def get_diff_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     diff_path = settings.data_dir / "tasks" / task.id / "diff.patch"
     if not diff_path.exists():
@@ -281,12 +281,12 @@ async def get_diff_endpoint(task_id: str, token: str = Depends(_require_auth)):
 
 
 @router.get("/tasks/{task_id}/audit")
-async def get_audit_endpoint(task_id: str, token: str = Depends(_require_auth)):
+async def get_audit_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     audit_path = settings.data_dir / "tasks" / task.id / "audit.json"
     if not audit_path.exists():
@@ -303,12 +303,12 @@ async def get_audit_endpoint(task_id: str, token: str = Depends(_require_auth)):
 
 
 @router.get("/tasks/{task_id}/result")
-async def get_result_endpoint(task_id: str, token: str = Depends(_require_auth)):
+async def get_result_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     result_path = settings.data_dir / "tasks" / task.id / "result.json"
     if not result_path.exists():
@@ -325,12 +325,12 @@ async def get_result_endpoint(task_id: str, token: str = Depends(_require_auth))
 
 
 @router.get("/tasks/{task_id}/transcript")
-async def get_transcript_endpoint(task_id: str, token: str = Depends(_require_auth)):
+async def get_transcript_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     transcript_path = settings.data_dir / "tasks" / task.id / "transcript.json"
     if not transcript_path.exists():
@@ -347,12 +347,12 @@ async def get_transcript_endpoint(task_id: str, token: str = Depends(_require_au
 
 
 @router.delete("/tasks/{task_id}")
-async def delete_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def delete_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status in (TaskStatus.setup, TaskStatus.running, TaskStatus.pending_approval):
         raise HTTPException(
@@ -368,12 +368,12 @@ async def delete_task_endpoint(task_id: str, token: str = Depends(_require_auth)
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def cancel_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status not in (TaskStatus.queued, TaskStatus.setup, TaskStatus.running):
         raise HTTPException(
@@ -405,7 +405,7 @@ class RetryRequest(BaseModel):
 async def retry_task_endpoint(
     task_id: str,
     body: RetryRequest,
-    token: str = Depends(_require_auth),
+    auth: AuthResult = Depends(_require_auth),
 ) -> dict:
     """Create a follow-up task that references the original.
 
@@ -416,7 +416,7 @@ async def retry_task_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status not in (TaskStatus.completed, TaskStatus.failed):
         raise HTTPException(
@@ -440,7 +440,7 @@ async def retry_task_endpoint(
         model=task.model,
         max_turns=body.max_turns or task.max_turns,
         priority=task.priority,
-        owner_token_hash=token_fingerprint(token),
+        owner_token_hash=auth.fingerprint,
         host_cwd=task.host_cwd,
         policy_preset=task.policy_preset,
         cost_budget_usd=task.cost_budget_usd,
@@ -514,7 +514,7 @@ async def retry_task_endpoint(
 
 
 @router.get("/tasks/{task_id}/bundle")
-async def export_bundle_endpoint(task_id: str, token: str = Depends(_require_auth)) -> dict:
+async def export_bundle_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
     """Export a reproducible task bundle with all artifacts.
 
     Returns a JSON bundle containing prompt, repo, diff, audit, cost,
@@ -525,7 +525,7 @@ async def export_bundle_endpoint(task_id: str, token: str = Depends(_require_aut
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     bundle: dict = {
         "version": "0.2.5",
@@ -599,15 +599,15 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
 
     # S10: Auth via Authorization header only (query param removed for security —
     # tokens in URLs leak via logs, browser history, and proxy logs).
-    token: str | None = None
+    raw_token: str | None = None
     auth_header = ws.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
-        token = auth_header[7:].strip()
-    if not token:
+        raw_token = auth_header[7:].strip()
+    if not raw_token:
         await ws.close(code=4001, reason="Missing bearer token")
         return
     try:
-        verify_token(token)
+        ws_auth = await verify_token_with_scopes(raw_token)
     except HTTPException:
         await ws.close(code=4003, reason="Invalid token")
         return
@@ -620,7 +620,7 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
         await ws.close()
         return
     try:
-        _require_task_owner(task.owner_token_hash, token)
+        _require_task_owner(task.owner_token_hash, ws_auth)
     except HTTPException:
         # Return same response as "not found" to prevent task ID enumeration
         await ws.send_json({"error": "Task not found"})

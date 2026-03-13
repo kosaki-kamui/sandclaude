@@ -10,7 +10,7 @@ from sandclaude.api.deps import (
     _sanitize_error,
     _validate_task_id,
 )
-from sandclaude.auth import require_scope, verify_token_with_scopes
+from sandclaude.auth import AuthResult, require_scope
 from sandclaude.db import store as db
 from sandclaude.github import create_pr
 from sandclaude.models import (
@@ -28,13 +28,13 @@ router = APIRouter()
 
 @router.post("/tasks/{task_id}/create-pr")
 async def create_pr_endpoint(
-    task_id: str, body: CreatePRRequest | None = None, token: str = Depends(_require_auth)
+    task_id: str, body: CreatePRRequest | None = None, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status != TaskStatus.completed:
         raise HTTPException(
@@ -70,7 +70,7 @@ async def create_pr_endpoint(
 async def approve_and_create_pr_endpoint(
     task_id: str,
     body: ApprovalDecisionRequest | None = None,
-    token: str = Depends(_require_auth),
+    auth: AuthResult = Depends(_require_auth),
 ) -> dict:
     """Approve the create_pr gate and create the PR in one step.
 
@@ -78,14 +78,13 @@ async def approve_and_create_pr_endpoint(
     skips the approval step and creates the PR directly. If rejected,
     returns 403. If no create_pr gate exists, creates the PR directly.
     """
-    auth = await verify_token_with_scopes(token)
     require_scope(auth, "tasks:approve")
 
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     if task.status != TaskStatus.completed:
         raise HTTPException(

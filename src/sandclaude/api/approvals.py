@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
-from sandclaude.auth import require_scope, verify_token_with_scopes
+from sandclaude.auth import AuthResult, require_scope
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import (
@@ -34,12 +34,14 @@ router = APIRouter()
 
 
 @router.get("/tasks/{task_id}/approvals")
-async def list_approvals_endpoint(task_id: str, token: str = Depends(_require_auth)) -> list[dict]:
+async def list_approvals_endpoint(
+    task_id: str, auth: AuthResult = Depends(_require_auth)
+) -> list[dict]:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
     gates = await db.get_approval_gates(task_id)
     return [g.model_dump() for g in gates]
 
@@ -49,17 +51,16 @@ async def approve_action_endpoint(
     task_id: str,
     action: str,
     body: ApprovalDecisionRequest | None = None,
-    token: str = Depends(_require_auth),
+    auth: AuthResult = Depends(_require_auth),
 ) -> dict:
     # Scope check: approval requires explicit tasks:approve permission
-    auth = await verify_token_with_scopes(token)
     require_scope(auth, "tasks:approve")
 
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     ok = await db.decide_approval_gate(
         task_id,
@@ -120,17 +121,16 @@ async def reject_action_endpoint(
     task_id: str,
     action: str,
     body: ApprovalDecisionRequest | None = None,
-    token: str = Depends(_require_auth),
+    auth: AuthResult = Depends(_require_auth),
 ) -> dict:
     # Scope check: rejection also requires explicit tasks:approve permission
-    auth = await verify_token_with_scopes(token)
     require_scope(auth, "tasks:approve")
 
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     ok = await db.decide_approval_gate(
         task_id,
@@ -160,7 +160,7 @@ async def reject_action_endpoint(
 async def generate_approval_link_endpoint(
     task_id: str,
     action: str,
-    token: str = Depends(_require_auth),
+    auth: AuthResult = Depends(_require_auth),
 ) -> dict:
     """Generate a signed, short-lived approval link for a task action.
 
@@ -174,7 +174,7 @@ async def generate_approval_link_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, token)
+    _require_task_owner(task.owner_token_hash, auth)
 
     link_token = create_approval_link_token(task_id, action)
     base_url = settings.api_url.rstrip("/")

@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from sandclaude.auth import token_fingerprint, verify_token_with_scopes
+from sandclaude.auth import AuthResult, token_fingerprint, verify_token_with_scopes
 
 # ── Constants ──────────────────────────────────────────────────
 
@@ -80,12 +80,11 @@ def _sanitize_error(exc: Exception) -> str:
 
 async def _require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> str:
+) -> AuthResult:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     # v0.2.0: Accept both legacy tokens and registry tokens
-    await verify_token_with_scopes(credentials.credentials)
-    return credentials.credentials
+    return await verify_token_with_scopes(credentials.credentials)
 
 
 def _validate_task_id(task_id: str) -> None:
@@ -93,9 +92,9 @@ def _validate_task_id(task_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid task_id format")
 
 
-def _check_create_rate_limit(token: str) -> None:
+def _check_create_rate_limit(auth: AuthResult) -> None:
     # F4: Use fingerprint as key so bucket count is bounded by valid tokens
-    fp = token_fingerprint(token)
+    fp = auth.fingerprint
     now = time.monotonic()
 
     # Evict oldest entries if too many fingerprints tracked (instead of clearing all)
@@ -114,7 +113,7 @@ def _check_create_rate_limit(token: str) -> None:
     bucket.append(now)
 
 
-def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
+def _require_task_owner(task_owner_hash: str | None, auth: AuthResult) -> None:
     """Verify the caller owns this task.
 
     Returns 404 (not 403) on ownership mismatch to prevent cross-tenant
@@ -124,7 +123,7 @@ def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
     Legacy/migrated tasks with NULL owner_token_hash are NOT open-access —
     they are restricted to the primary server token only.
     """
-    caller_fp = token_fingerprint(token)
+    caller_fp = auth.fingerprint
     if not task_owner_hash:
         # Legacy row: only the primary server token (first candidate) may access.
         from sandclaude.auth import get_token
