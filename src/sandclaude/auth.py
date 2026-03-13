@@ -283,3 +283,62 @@ def get_token() -> str:
 def token_fingerprint(token: str) -> str:
     """Stable, non-reversible fingerprint used for task ownership checks."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: Session cookies for GitHub OAuth
+# ---------------------------------------------------------------------------
+
+
+def create_session_cookie(user_id: int, username: str, max_age_s: int = 28800) -> str:
+    """Create a signed session cookie value. Default 8h TTL."""
+    import json
+    import time
+
+    payload = {
+        "user_id": user_id,
+        "username": username,
+        "exp": int(time.time()) + max_age_s,
+    }
+    data = json.dumps(payload, separators=(",", ":"))
+    import hmac
+
+    key = get_token().encode("utf-8")
+    sig = hmac.new(key, data.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{data}.{sig}"
+
+
+def verify_session_cookie(cookie: str) -> AuthResult | None:
+    """Verify a signed session cookie. Returns AuthResult or None."""
+    import json
+    import time
+
+    try:
+        parts = cookie.rsplit(".", 1)
+        if len(parts) != 2:
+            return None
+        data, sig = parts
+
+        import hmac
+
+        key = get_token().encode("utf-8")
+        expected = hmac.new(key, data.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not secrets.compare_digest(sig, expected):
+            return None
+
+        payload = json.loads(data)
+        if payload.get("exp", 0) < int(time.time()):
+            return None
+
+        return AuthResult(
+            token="",  # no raw token for session auth
+            fingerprint="",
+            is_legacy=False,
+            scopes=["tasks:approve", "tasks:read"],  # limited scope for sessions
+            token_name=None,
+            user_id=payload.get("user_id"),
+            username=payload.get("username"),
+            display_name=payload.get("username"),  # display_name = username for session
+        )
+    except Exception:
+        return None

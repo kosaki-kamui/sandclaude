@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Cookie, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 
 from sandclaude.auth import AuthResult, require_scope
@@ -189,7 +189,12 @@ async def generate_approval_link_endpoint(
 
 
 @router.get("/approve/{task_id}/{action}")
-async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLResponse:
+async def approval_ui_page(
+    task_id: str,
+    action: str,
+    token: str = "",
+    sandclaude_session: str | None = Cookie(None),
+) -> HTMLResponse:
     """Server-rendered approval page. Linked from Slack/webhook notifications.
 
     Uses a signed, short-lived approval token (NOT a raw API token).
@@ -307,6 +312,16 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
                 "mode": est.mode,
             }
 
+    # v0.3.0: Check for GitHub OAuth session
+    logged_in_as = None
+    github_oauth_available = bool(settings.github_client_id)
+    if sandclaude_session:
+        from sandclaude.auth import verify_session_cookie
+
+        session = verify_session_cookie(sandclaude_session)
+        if session:
+            logged_in_as = session.username
+
     html = template.render(
         task_id=task.id,
         action=action,
@@ -326,6 +341,8 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
         has_pending=has_pending,
         has_create_pr_gate=any(g.action == "create_pr" for g in gates),
         budget_check=budget_check_ctx,
+        logged_in_as=logged_in_as,
+        github_oauth_available=github_oauth_available,
     )
     return HTMLResponse(html)
 

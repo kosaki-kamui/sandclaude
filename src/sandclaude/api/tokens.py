@@ -92,9 +92,7 @@ async def list_tokens_endpoint(auth: AuthResult = Depends(_require_auth)) -> lis
 
 
 @router.post("/tokens/{token_id}/revoke")
-async def revoke_token_endpoint(
-    token_id: int, auth: AuthResult = Depends(_require_auth)
-) -> dict:
+async def revoke_token_endpoint(token_id: int, auth: AuthResult = Depends(_require_auth)) -> dict:
     require_scope(auth, "admin:tokens")
     ok = await db.revoke_token(token_id)
     if not ok:

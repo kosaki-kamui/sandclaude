@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     auth_tokens: str = ""  # optional extra bearer tokens (comma-separated)
     allowed_repo_base: str = ""  # comma-separated allowed base dirs for local repo mounts
     webhook_include_prompt: bool = False  # include prompt in webhooks
+    # v0.3.0: GitHub OAuth for approval UI (optional)
+    github_client_id: str = ""
+    github_client_secret: str = ""
 
     @field_validator("task_timeout_s")
     @classmethod

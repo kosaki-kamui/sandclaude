@@ -11,7 +11,7 @@ import re
 import time
 from collections import defaultdict, deque
 
-from fastapi import Depends, HTTPException
+from fastapi import Cookie, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from sandclaude.auth import AuthResult, token_fingerprint, verify_token_with_scopes
@@ -80,11 +80,19 @@ def _sanitize_error(exc: Exception) -> str:
 
 async def _require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    sandclaude_session: str | None = Cookie(None),
 ) -> AuthResult:
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    # v0.2.0: Accept both legacy tokens and registry tokens
-    return await verify_token_with_scopes(credentials.credentials)
+    # v0.2.0: Accept bearer tokens (legacy + registry)
+    if credentials is not None:
+        return await verify_token_with_scopes(credentials.credentials)
+    # v0.3.0: Fall back to session cookie (GitHub OAuth)
+    if sandclaude_session:
+        from sandclaude.auth import verify_session_cookie
+
+        result = verify_session_cookie(sandclaude_session)
+        if result:
+            return result
+    raise HTTPException(status_code=401, detail="Missing Authorization header")
 
 
 def _validate_task_id(task_id: str) -> None:
