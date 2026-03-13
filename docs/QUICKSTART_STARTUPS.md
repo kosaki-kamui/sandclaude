@@ -33,7 +33,7 @@ docker compose up -d --build
 
 # Verify
 curl http://localhost:3271/health
-# {"status":"ok","version":"0.2.0"}
+# {"status":"ok","version":"0.2.5"}
 
 # Get your admin token
 cat data/.token
@@ -179,6 +179,20 @@ curl -s -X PUT $HOST/policies/hotfix \
     "max_turns": 10,
     "max_cost_usd": 2.0
   }' | jq .
+
+# Create a budget-controlled preset that requires approval for expensive tasks
+curl -s -X PUT $HOST/policies/budget-gated \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_cost_usd": 5.00,
+    "budget_fail_policy": "require_approval",
+    "max_turns": 30,
+    "requires_approval_for": ["create_pr"]
+  }' | jq .
+# Tasks predicted to cost >$5 will block in pending_approval.
+# Tasks under budget proceed normally.
+# The estimator intentionally errs on the safe side — actual cost may be lower.
 ```
 
 ---

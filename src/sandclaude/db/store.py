@@ -82,6 +82,8 @@ async def init_db() -> None:
             "requires_approval": "INTEGER NOT NULL DEFAULT 0",
             "declared_secrets": "TEXT",
             "cost_budget_usd": "REAL",
+            # v0.2.5 columns
+            "budget_check_json": "TEXT",
         }
         for col_name, col_type in migrations.items():
             if col_name not in cols:
@@ -250,6 +252,7 @@ async def update_task(
     total_cost_usd: float | None = None,
     error: str | None = None,
     requires_approval: int | None = None,
+    budget_check_json: str | None = None,
 ) -> None:
     sets: list[str] = []
     vals: list[object] = []
@@ -281,6 +284,9 @@ async def update_task(
     if requires_approval is not None:
         sets.append("requires_approval = ?")
         vals.append(requires_approval)
+    if budget_check_json is not None:
+        sets.append("budget_check_json = ?")
+        vals.append(budget_check_json)
 
     if not sets:
         return
@@ -436,6 +442,7 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         requires_approval=row["requires_approval"] if "requires_approval" in keys else 0,
         declared_secrets=row["declared_secrets"] if "declared_secrets" in keys else None,
         cost_budget_usd=row["cost_budget_usd"] if "cost_budget_usd" in keys else None,
+        budget_check_json=row["budget_check_json"] if "budget_check_json" in keys else None,
     )
 
 

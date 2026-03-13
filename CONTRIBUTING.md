@@ -53,6 +53,7 @@ src/sandclaude/
 ├── auth.py                # Bearer token auth + scoped tokens + signed approval links
 ├── cli.py                 # CLI entrypoint (sandclaude init)
 ├── config.py              # Configuration from environment variables
+├── estimator.py           # Pre-flight cost estimation (static + model-assisted)
 ├── github.py              # GitHub PR creation via gh CLI + AI-generated summaries
 ├── models.py              # Pydantic models and shared types
 ├── policy.py              # Policy preset merge semantics + enforcement

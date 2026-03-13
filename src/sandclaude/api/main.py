@@ -153,7 +153,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="sandclaude", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="sandclaude", version="0.2.5", lifespan=lifespan)
 security = HTTPBearer(auto_error=False)
 
 
@@ -236,7 +236,7 @@ def _require_task_owner(task_owner_hash: str | None, token: str) -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.2.5"}
 
 
 # ── Pool stats ─────────────────────────────────────────────────
@@ -307,14 +307,85 @@ async def create_task_endpoint(
         cost_budget_usd=request.cost_budget_usd,
     )
 
-    # Resolve policy and create approval gates if needed
+    # Resolve effective policy (but do NOT create post-execution gates yet —
+    # those are deferred until after the budget check to avoid deadlock
+    # between pre-execution budget gates and post-execution action gates)
     from sandclaude.policy import create_required_gates, resolve_effective_policy
 
     policy = await resolve_effective_policy(task)
+
+    # v0.2.5: Pre-flight budget admission control
+    #
+    # Effective budget = min(preset.max_cost_usd, task.cost_budget_usd).
+    # A task cannot raise the budget above the preset ceiling.
+    # If the preset defines max_cost_usd but the task omits cost_budget_usd,
+    # the preset ceiling still applies.
+    budget_check: dict | None = None
+    effective_budget: float | None = policy.max_cost_usd
+    if task.cost_budget_usd is not None:
+        if effective_budget is not None:
+            effective_budget = min(effective_budget, task.cost_budget_usd)
+        else:
+            effective_budget = task.cost_budget_usd
+
+    if effective_budget is not None:
+        from sandclaude.estimator import run_budget_check
+
+        budget_fail_policy = policy.budget_fail_policy or "reject"
+        has_api_key = bool(settings.anthropic_api_key)
+        budget_check = await run_budget_check(
+            model=task.model,
+            max_turns=task.max_turns,
+            prompt=task.prompt,
+            max_budget_usd=effective_budget,
+            budget_fail_policy=budget_fail_policy,
+            anthropic_api_key=settings.anthropic_api_key,
+            has_ai_pr_title=has_api_key,
+            has_ai_pr_summary=has_api_key,
+        )
+
+        # Persist the admission-time budget_check so GET and approval UI
+        # can display the exact same numbers without recomputing.
+        import json as _json
+
+        await db.update_task(task_id, budget_check_json=_json.dumps(budget_check))
+
+        if budget_check["status"] == "rejected":
+            await db.delete_task(task_id)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "predicted budget exceeds budget cap",
+                    "budget_check": budget_check,
+                },
+            )
+
+        if budget_check["status"] == "requires_approval":
+            await db.create_approval_gate(task_id, "budget_exceeded")
+            await db.update_task(
+                task_id,
+                requires_approval=1,
+                status=TaskStatus.pending_approval,
+            )
+            # Do NOT submit — task blocks until budget gate is approved.
+            # Do NOT create post-execution gates yet — they'll be created
+            # when the budget gate is approved and execution resumes.
+            # Re-fetch task to return current DB state (not stale in-memory).
+            fresh_task = await db.get_task(task_id)
+            result = fresh_task.safe_dump() if fresh_task else task.safe_dump()
+            result["budget_check"] = budget_check
+            return result
+
+    # Create post-execution approval gates (e.g. create_pr) now that
+    # the budget check has passed. These gates fire after execution,
+    # not before, so they don't block task submission.
     await create_required_gates(task_id, policy)
 
     await submit_task(task)
-    return task.safe_dump()  # S11: exclude internal fields
+    result = task.safe_dump()
+    if budget_check:
+        result["budget_check"] = budget_check
+    return result
 
 
 # ── GET /tasks ─────────────────────────────────────────────────
@@ -353,6 +424,44 @@ async def get_task_endpoint(task_id: str, token: str = Depends(_require_auth)) -
     diff_path = task_dir / "diff.patch"
     if diff_path.exists():
         result["diff"] = await _read_file_async(diff_path)
+
+    # Include budget_check: prefer stored admission data, fall back to
+    # recomputation for pre-upgrade tasks that have a budget gate but no
+    # stored budget_check_json.
+    gates = await db.get_approval_gates(task_id)
+    budget_gate = next((g for g in gates if g.action == "budget_exceeded"), None)
+    if task.budget_check_json:
+        import json as _json
+
+        budget_info = _json.loads(task.budget_check_json)
+        if budget_gate:
+            budget_info["gate_status"] = budget_gate.status.value
+        result["budget_check"] = budget_info
+    elif budget_gate:
+        # Fallback for tasks created before budget_check_json was stored
+        from sandclaude.estimator import estimate_static
+        from sandclaude.policy import resolve_effective_policy
+
+        eff_policy = await resolve_effective_policy(task)
+        eff_budget: float | None = eff_policy.max_cost_usd
+        if task.cost_budget_usd is not None:
+            if eff_budget is not None:
+                eff_budget = min(eff_budget, task.cost_budget_usd)
+            else:
+                eff_budget = task.cost_budget_usd
+        if eff_budget is not None:
+            est = estimate_static(
+                model=task.model,
+                max_turns=task.max_turns,
+                prompt_length=len(task.prompt),
+            )
+            result["budget_check"] = {
+                "predicted_total_usd": round(est.predicted_total_usd, 4),
+                "max_budget_usd": round(eff_budget, 4),
+                "confidence": est.confidence,
+                "gate_status": budget_gate.status.value,
+                "mode": est.mode,
+            }
 
     return result
 
@@ -636,7 +745,44 @@ async def approve_action_endpoint(
     if not ok:
         raise HTTPException(status_code=404, detail="No pending approval gate found")
 
-    # Update task if no more pending gates
+    # Check if this was a pre-execution budget gate on a pending_approval task
+    # If so, resume execution now that the budget is approved
+    task = await db.get_task(task_id)  # re-fetch after gate update
+    if action == "budget_exceeded" and task and task.status == TaskStatus.pending_approval:
+        # Only check budget-related gates, not post-execution gates like create_pr
+        budget_gates = await db.get_approval_gates(task_id)
+        budget_pending = any(
+            g.action == "budget_exceeded" and g.status.value == "pending" for g in budget_gates
+        )
+        if not budget_pending:
+            # Create post-execution gates now (deferred from task creation)
+            from sandclaude.policy import (
+                create_required_gates,
+                resolve_effective_policy,
+            )
+
+            eff_policy = await resolve_effective_policy(task)
+            await create_required_gates(task_id, eff_policy)
+
+            # Check if deferred gates were created (e.g. create_pr)
+            # If so, requires_approval stays 1; if not, clear it
+            still_pending = await db.has_pending_gates(task_id)
+            await db.update_task(
+                task_id,
+                status=TaskStatus.queued,
+                requires_approval=1 if still_pending else 0,
+            )
+            task = await db.get_task(task_id)
+            if task:
+                await submit_task(task)
+            return {
+                "status": "approved",
+                "task_id": task_id,
+                "action": action,
+                "execution": "resumed",
+            }
+
+    # For non-budget gates, just update requires_approval flag
     if not await db.has_pending_gates(task_id):
         await db.update_task(task_id, requires_approval=0)
 
@@ -669,6 +815,17 @@ async def reject_action_endpoint(
     )
     if not ok:
         raise HTTPException(status_code=404, detail="No pending approval gate found")
+
+    # If this was a pre-execution budget gate rejection, mark the task as failed
+    task = await db.get_task(task_id)
+    if action == "budget_exceeded" and task and task.status == TaskStatus.pending_approval:
+        await db.update_task(
+            task_id,
+            status=TaskStatus.failed,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            error="budget_approval_rejected",
+            requires_approval=0,
+        )
 
     return {"status": "rejected", "task_id": task_id, "action": action}
 
@@ -778,6 +935,50 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
     pr_source_branch = f"sandclaude/{task.id}"
     pr_target_branch = task.branch or "(default branch)"
 
+    # Budget check context — prefer stored admission data, fall back to
+    # recomputation for pre-upgrade tasks. Use live gate status, not the
+    # stale admission-time decision.
+    budget_check_ctx: dict | None = None
+    budget_gate = next((g for g in gates if g.action == "budget_exceeded"), None)
+    live_status = budget_gate.status.value if budget_gate else None
+
+    if task.budget_check_json:
+        import json as _json
+
+        stored = _json.loads(task.budget_check_json)
+        budget_check_ctx = {
+            "predicted_total_usd": f"{stored.get('predicted_total_usd', 0):.4f}",
+            "max_budget_usd": f"{stored.get('max_budget_usd', 0):.2f}",
+            "confidence": stored.get("confidence", "unknown"),
+            "status": live_status or stored.get("status", "unknown"),
+            "mode": stored.get("mode", "static"),
+        }
+    elif budget_gate:
+        # Fallback for tasks created before budget_check_json was stored
+        from sandclaude.estimator import estimate_static
+        from sandclaude.policy import resolve_effective_policy
+
+        eff_policy = await resolve_effective_policy(task)
+        eff_budget: float | None = eff_policy.max_cost_usd
+        if task.cost_budget_usd is not None:
+            if eff_budget is not None:
+                eff_budget = min(eff_budget, task.cost_budget_usd)
+            else:
+                eff_budget = task.cost_budget_usd
+        if eff_budget is not None:
+            est = estimate_static(
+                model=task.model,
+                max_turns=task.max_turns,
+                prompt_length=len(task.prompt),
+            )
+            budget_check_ctx = {
+                "predicted_total_usd": f"{est.predicted_total_usd:.4f}",
+                "max_budget_usd": f"{eff_budget:.2f}",
+                "confidence": est.confidence,
+                "status": live_status or "unknown",
+                "mode": est.mode,
+            }
+
     html = template.render(
         task_id=task.id,
         action=action,
@@ -796,6 +997,7 @@ async def approval_ui_page(task_id: str, action: str, token: str = "") -> HTMLRe
         gates=[{"status": g.status.value, "action": g.action, "reason": g.reason} for g in gates],
         has_pending=has_pending,
         has_create_pr_gate=any(g.action == "create_pr" for g in gates),
+        budget_check=budget_check_ctx,
     )
     return HTMLResponse(html)
 
@@ -1158,10 +1360,65 @@ async def retry_task_endpoint(
     from sandclaude.policy import create_required_gates, resolve_effective_policy
 
     policy = await resolve_effective_policy(new_task)
+
+    # Run the same budget admission check as POST /tasks
+    budget_check: dict | None = None
+    effective_budget: float | None = policy.max_cost_usd
+    if new_task.cost_budget_usd is not None:
+        if effective_budget is not None:
+            effective_budget = min(effective_budget, new_task.cost_budget_usd)
+        else:
+            effective_budget = new_task.cost_budget_usd
+
+    if effective_budget is not None:
+        from sandclaude.estimator import run_budget_check
+
+        budget_fail_policy = policy.budget_fail_policy or "reject"
+        has_api_key = bool(settings.anthropic_api_key)
+        budget_check = await run_budget_check(
+            model=new_task.model,
+            max_turns=new_task.max_turns,
+            prompt=new_task.prompt,
+            max_budget_usd=effective_budget,
+            budget_fail_policy=budget_fail_policy,
+            anthropic_api_key=settings.anthropic_api_key,
+            has_ai_pr_title=has_api_key,
+            has_ai_pr_summary=has_api_key,
+        )
+
+        import json as _json
+
+        await db.update_task(new_task_id, budget_check_json=_json.dumps(budget_check))
+
+        if budget_check["status"] == "rejected":
+            await db.delete_task(new_task_id)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "predicted budget exceeds budget cap",
+                    "budget_check": budget_check,
+                },
+            )
+
+        if budget_check["status"] == "requires_approval":
+            await db.create_approval_gate(new_task_id, "budget_exceeded")
+            await db.update_task(
+                new_task_id,
+                requires_approval=1,
+                status=TaskStatus.pending_approval,
+            )
+            fresh = await db.get_task(new_task_id)
+            result = fresh.safe_dump() if fresh else new_task.safe_dump()
+            result["budget_check"] = budget_check
+            return result
+
     await create_required_gates(new_task_id, policy)
 
     await submit_task(new_task)
-    return new_task.safe_dump()
+    result = new_task.safe_dump()
+    if budget_check:
+        result["budget_check"] = budget_check
+    return result
 
 
 # ── v0.2.0: Task bundle export ───────────────────────────────
@@ -1182,7 +1439,7 @@ async def export_bundle_endpoint(task_id: str, token: str = Depends(_require_aut
     _require_task_owner(task.owner_token_hash, token)
 
     bundle: dict = {
-        "version": "0.2.0",
+        "version": "0.2.5",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "task": task.safe_dump(),
     }

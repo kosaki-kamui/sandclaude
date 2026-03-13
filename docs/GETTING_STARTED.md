@@ -84,7 +84,7 @@ docker compose up -d --build
 
 # Verify it's running
 curl http://localhost:3271/health
-# Should return: {"status":"ok","version":"0.2.0"}
+# Should return: {"status":"ok","version":"0.2.5"}
 ```
 
 > **Note:** The API container automatically fixes `./data` bind-mount ownership

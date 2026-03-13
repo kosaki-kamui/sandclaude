@@ -87,6 +87,35 @@
             </div>
         </div>
 
+        {% if budget_check %}
+        <div class="card">
+            <h2>Budget Estimate</h2>
+            <div class="meta">
+                <div class="meta-item">
+                    <span class="meta-label">Predicted cost:</span>
+                    <span class="meta-value">${{ budget_check.predicted_total_usd }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Budget cap:</span>
+                    <span class="meta-value">${{ budget_check.max_budget_usd }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Confidence:</span>
+                    <span class="meta-value">{{ budget_check.confidence }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Decision:</span>
+                    <span class="meta-value">{{ budget_check.status }}</span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Mode:</span>
+                    <span class="meta-value">{{ budget_check.mode }}</span>
+                </div>
+            </div>
+            <p style="color: #8b949e; font-size: 0.8rem; margin-top: 0.5rem;">Estimates intentionally err on the safe side. Actual cost may be lower.</p>
+        </div>
+        {% endif %}
+
         {% if risk_reasons %}
         <div class="card">
             <h2>Risk Signals</h2>

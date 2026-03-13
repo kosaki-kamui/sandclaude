@@ -5,6 +5,21 @@ All notable changes to sandclaude will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-03-12
+
+### Added
+
+- **Pre-flight budget admission control** — estimates task cost before execution and gates on budget cap. Static estimator uses model pricing, max_turns, and prompt length. Model-assisted estimation via Haiku for gray-zone tasks (within 80% of cap). Safety rule: `max(static, model_max)` — model can only make estimates more conservative
+- **Budget fail policies** — `reject` (default), `warn`, or `require_approval` when predicted cost exceeds `cost_budget_usd`. Policy comes from preset, not task request (restrictive)
+- **Budget check in task response** — `POST /tasks` returns `budget_check` with predicted cost, confidence, and decision when `cost_budget_usd` is set
+- **Approval UI shows repo/branch/PR context** — repo URL, task branch, source branch (`sandclaude/{task_id}`), and target branch displayed in approval page
+- **One-click approve-and-create-pr** — `POST /tasks/{id}/approve-and-create-pr` approves the gate and creates the PR in one step. Success shows clickable PR URL
+- **HTML template included in package** — `templates/*.html` in package-data so pip-installed deployments include the approval UI
+
+### Changed
+
+- **Built-in presets include budget_fail_policy** — `docs-only`, `tests-only`, `review-only` use `reject`; `bugfix-pr`, `deps-upgrade` use `require_approval`
+
 ## [0.2.0] - 2026-03-12
 
 ### Added
@@ -56,5 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker socket proxy** — never mounts Docker socket directly into the API container
 - **gosu-based entrypoint** — proper privilege drop for bind-mount ownership fixes
 
+[0.2.5]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.2.5
 [0.2.0]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.1.0

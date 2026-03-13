@@ -17,6 +17,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "requires_approval_for": [],
         "max_turns": 15,
         "max_cost_usd": 0.50,
+        "budget_fail_policy": "reject",
     },
     "tests-only": {
         "allowed_commands": [
@@ -38,6 +39,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "requires_approval_for": [],
         "max_turns": 25,
         "max_cost_usd": 2.00,
+        "budget_fail_policy": "reject",
     },
     "bugfix-pr": {
         "allowed_commands": None,  # no restriction
@@ -47,6 +49,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "requires_approval_for": ["create_pr"],
         "max_turns": 30,
         "max_cost_usd": 5.00,
+        "budget_fail_policy": "require_approval",
     },
     "deps-upgrade": {
         "allowed_commands": [
@@ -74,6 +77,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "requires_approval_for": ["create_pr"],
         "max_turns": 25,
         "max_cost_usd": 3.00,
+        "budget_fail_policy": "require_approval",
     },
     "review-only": {
         "allowed_commands": ["cat", "ls", "find", "grep", "head", "tail", "wc"],
@@ -83,6 +87,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "requires_approval_for": [],
         "max_turns": 10,
         "max_cost_usd": 1.00,
+        "budget_fail_policy": "reject",
     },
 }
 

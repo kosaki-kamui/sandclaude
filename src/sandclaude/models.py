@@ -164,6 +164,7 @@ class Task(BaseModel):
     requires_approval: int = 0  # 1 if any gate is pending
     declared_secrets: str | None = None  # JSON-encoded list of requested secret names
     cost_budget_usd: float | None = None
+    budget_check_json: str | None = None  # JSON-encoded budget_check from admission
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""
@@ -173,6 +174,7 @@ class Task(BaseModel):
         d.pop("container_id", None)
         d.pop("owner_token_hash", None)
         d.pop("host_cwd", None)
+        d.pop("budget_check_json", None)  # internal; exposed as budget_check
         # Sanitize error field to avoid leaking internal paths/config to clients
         if d.get("error"):
             err = d["error"]
@@ -332,6 +334,8 @@ class PolicyPresetConfig(BaseModel):
     allowed_repos: list[str] | None = None  # repo URL patterns or "." for local
     blocked_branches: list[str] | None = None  # branches that cannot be targeted
     pr_only: bool = False  # if True, direct push is blocked (only PRs allowed)
+    # v0.2.5: Budget admission control
+    budget_fail_policy: str | None = None  # "reject", "warn", "require_approval"
 
 
 # ---------------------------------------------------------------------------

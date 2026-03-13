@@ -54,6 +54,40 @@ sandclaude is the bridge between "Claude can code" and "Claude can code *for my 
 - **PR risk summary** - automated risk assessment with file categorization, sensitive file detection, and risk level
 - **AI code review** - `POST /tasks/{id}/review` for structured review of completed diffs
 - **Secrets management** - tasks declare needed secrets, server injects per policy, audit records names (never values)
+- **Pre-flight budget estimation** - estimates task cost before execution using model pricing + max_turns; model-assisted Haiku estimation for gray-zone tasks; rejects, warns, or gates on budget cap
+
+### Pre-flight Budget Admission
+
+When `cost_budget_usd` is set (on the task or via preset `max_cost_usd`), sandclaude estimates the task's likely cost **before execution** and compares it to the effective budget cap. The effective cap is `min(preset.max_cost_usd, task.cost_budget_usd)` — a task cannot raise the budget above the preset ceiling.
+
+**Decision flow:**
+
+| Predicted cost vs. cap | `budget_fail_policy` | Result |
+|----------------------|---------------------|--------|
+| Below cap | any | `passed` — task proceeds normally |
+| Above cap | `reject` (default) | `rejected` — task is not created (422) |
+| Above cap | `warn` | `warning` — task proceeds with warning in response |
+| Above cap | `require_approval` | `requires_approval` — task blocks in `pending_approval` until approved |
+
+**How estimation works:**
+- A static estimator calculates cost from model pricing, `max_turns`, prompt length, and addon calls (AI review, PR title/summary)
+- If the static estimate is within 80% of the budget cap (the "gray zone"), a lightweight Haiku call refines the estimate by reasoning about task complexity. The 80% threshold only triggers this refinement — it is **not** a rejection threshold
+- Safety rule: `effective_estimate = max(static, model_max)` — the model can only make estimates more conservative, never less
+- Estimates intentionally err on the safe side. A task may be blocked even if the actual final cost would have been lower. This is by design for unattended execution
+
+**Example preset with budget control:**
+
+```bash
+curl -s -X PUT $HOST/policies/cost-controlled \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "max_cost_usd": 3.00,
+    "budget_fail_policy": "require_approval",
+    "requires_approval_for": ["create_pr"],
+    "max_turns": 25
+  }'
+```
 
 ## Two-Phase Sandbox Architecture
 
@@ -178,6 +212,7 @@ All endpoints require `Authorization: Bearer <token>` (except `/health`). WebSoc
 | `GET` | `/tasks/{task_id}/approvals` | List approval gates |
 | `POST` | `/tasks/{task_id}/approve/{action}` | Approve a gate (requires `tasks:approve`) |
 | `POST` | `/tasks/{task_id}/reject/{action}` | Reject a gate (requires `tasks:approve`) |
+| `POST` | `/tasks/{task_id}/approve-and-create-pr` | Approve gate + create PR in one step |
 | `POST` | `/tasks/{task_id}/approval-link/{action}` | Generate signed approval link |
 | `GET` | `/approve/{task_id}/{action}` | Server-rendered approval page |
 | `POST` | `/tokens` | Create a scoped token (requires `admin:tokens`) |
