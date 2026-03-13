@@ -247,6 +247,7 @@ VALID_SCOPES = frozenset(
         "prs:create",
         "admin:tokens",
         "admin:policies",
+        "admin:users",
     }
 )
 
@@ -351,3 +352,27 @@ class NetworkDeny(BaseModel):
     port: int | None = None
     reason: str  # 'not_allowlisted', 'private_ip', 'policy_reject', 'stale_ip'
     explanation: str  # human-readable message
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: Users / identity
+# ---------------------------------------------------------------------------
+
+
+class User(BaseModel):
+    id: int = 0
+    username: str
+    display_name: str
+    email: str | None = None
+    github_username: str | None = None
+    is_service_account: int = 0  # SQLite uses int for bool
+    created_at: str = ""
+    created_by_user_id: int | None = None
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z0-9._-]+$")
+    display_name: str = Field(..., min_length=1, max_length=128)
+    email: str | None = Field(None, max_length=256)
+    github_username: str | None = Field(None, max_length=64)
+    is_service_account: bool = False

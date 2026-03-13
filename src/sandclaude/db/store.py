@@ -21,6 +21,7 @@ from sandclaude.models import (
     TaskPriority,
     TaskStatus,
     TokenInfo,
+    User,
 )
 
 # F2: DB_PATH as a function so it always reflects current settings.data_dir.
@@ -117,6 +118,36 @@ async def init_db() -> None:
                 created_by TEXT
             )
         """)
+
+        # v0.3.0: Users
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                email TEXT,
+                github_username TEXT,
+                is_service_account INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                created_by_user_id INTEGER REFERENCES users(id)
+            )
+        """)
+
+        # v0.3.0 migrations: add user_id columns
+        cursor = await db.execute("PRAGMA table_info(tokens)")
+        token_cols = {row[1] for row in await cursor.fetchall()}
+        if "user_id" not in token_cols:
+            await db.execute("ALTER TABLE tokens ADD COLUMN user_id INTEGER REFERENCES users(id)")
+
+        cursor = await db.execute("PRAGMA table_info(tasks)")
+        task_cols_v3 = {row[1] for row in await cursor.fetchall()}
+        if "created_by_user_id" not in task_cols_v3:
+            await db.execute("ALTER TABLE tasks ADD COLUMN created_by_user_id INTEGER")
+
+        cursor = await db.execute("PRAGMA table_info(approval_gates)")
+        gate_cols = {row[1] for row in await cursor.fetchall()}
+        if "decided_by_user_id" not in gate_cols:
+            await db.execute("ALTER TABLE approval_gates ADD COLUMN decided_by_user_id INTEGER")
 
         # v0.2.0: Policy presets
         await db.execute("""
@@ -683,3 +714,121 @@ async def get_task_secrets(task_id: str) -> list[dict]:
         {"secret_name": r["secret_name"], "phase": r["phase"], "granted": bool(r["granted"])}
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# v0.3.0: Users CRUD
+# ---------------------------------------------------------------------------
+
+
+def _row_to_user(row: aiosqlite.Row) -> User:
+    return User(
+        id=row["id"],
+        username=row["username"],
+        display_name=row["display_name"],
+        email=row["email"],
+        github_username=row["github_username"],
+        is_service_account=row["is_service_account"],
+        created_at=row["created_at"],
+        created_by_user_id=row["created_by_user_id"],
+    )
+
+
+async def create_user(
+    *,
+    username: str,
+    display_name: str,
+    email: str | None = None,
+    github_username: str | None = None,
+    is_service_account: bool = False,
+    created_by_user_id: int | None = None,
+) -> User:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute(
+            """INSERT INTO users
+               (username, display_name, email, github_username,
+                is_service_account, created_at, created_by_user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                username,
+                display_name,
+                email,
+                github_username,
+                int(is_service_account),
+                now,
+                created_by_user_id,
+            ),
+        )
+        await conn.commit()
+        user_id = cursor.lastrowid
+    user = await get_user(user_id)
+    if user is None:
+        raise RuntimeError(f"Failed to read back user {user_id} after creation")
+    return user
+
+
+async def get_user(user_id: int) -> User | None:
+    async with aiosqlite.connect(_db_path()) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return _row_to_user(row) if row else None
+
+
+async def get_user_by_username(username: str) -> User | None:
+    async with aiosqlite.connect(_db_path()) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        row = await cursor.fetchone()
+        return _row_to_user(row) if row else None
+
+
+async def get_user_by_github_username(github_username: str) -> User | None:
+    async with aiosqlite.connect(_db_path()) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM users WHERE github_username = ?", (github_username,)
+        )
+        row = await cursor.fetchone()
+        return _row_to_user(row) if row else None
+
+
+async def list_users() -> list[User]:
+    async with aiosqlite.connect(_db_path()) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM users ORDER BY created_at")
+        rows = await cursor.fetchall()
+        return [_row_to_user(r) for r in rows]
+
+
+async def delete_user(user_id: int) -> bool:
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
+async def update_user(user_id: int, **kwargs: object) -> None:
+    sets: list[str] = []
+    vals: list[object] = []
+    for col in ("display_name", "email", "github_username", "created_by_user_id"):
+        if col in kwargs:
+            sets.append(f"{col} = ?")
+            vals.append(kwargs[col])
+    if not sets:
+        return
+    vals.append(user_id)
+    async with aiosqlite.connect(_db_path()) as conn:
+        await conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?", vals)
+        await conn.commit()
+
+
+async def link_orphan_tokens_to_user(user_id: int) -> int:
+    """Link tokens with NULL user_id to the given user. Returns count."""
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute(
+            "UPDATE tokens SET user_id = ? WHERE user_id IS NULL", (user_id,)
+        )
+        await conn.commit()
+        return cursor.rowcount

@@ -27,6 +27,7 @@ from sandclaude.api.review import router as review_router
 from sandclaude.api.system import router as system_router
 from sandclaude.api.tasks import router as tasks_router
 from sandclaude.api.tokens import router as tokens_router
+from sandclaude.api.users import router as users_router
 from sandclaude.auth import init_token
 from sandclaude.config import settings
 from sandclaude.db import store as db
@@ -105,3 +106,4 @@ app.include_router(approvals_router)
 app.include_router(tokens_router)
 app.include_router(policies_router)
 app.include_router(review_router)
+app.include_router(users_router)
