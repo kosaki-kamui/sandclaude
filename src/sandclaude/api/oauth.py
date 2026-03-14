@@ -30,34 +30,47 @@ def _oauth_enabled() -> bool:
     return bool(settings.github_client_id and settings.github_client_secret)
 
 
-def _sign_state(return_to: str) -> str:
-    """Create an HMAC-signed, time-limited OAuth state token."""
+def _sign_state(return_to: str) -> tuple[str, str]:
+    """Create an HMAC-signed, time-limited OAuth state token.
+
+    Returns (state_string, nonce) — the nonce must be set as a cookie
+    to bind the state to the browser that initiated the flow.
+    """
+    nonce = secrets.token_hex(16)
     data = {
         "return_to": return_to,
         "exp": int(time.time()) + _STATE_TTL_S,
-        "nonce": secrets.token_hex(8),
+        "nonce": nonce,
     }
     payload = json.dumps(data, separators=(",", ":"))
     key = get_token().encode("utf-8")
     sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
+    return f"{payload}.{sig}", nonce
 
 
-def _verify_state(state: str) -> str | None:
-    """Verify an HMAC-signed state token. Returns return_to or None."""
+def _verify_state(state: str, expected_nonce: str | None) -> str | None:
+    """Verify an HMAC-signed state token and its browser-bound nonce.
+
+    Returns return_to or None. The nonce from the state must match the
+    nonce cookie set during the login redirect — this prevents cross-browser
+    state replay (login-CSRF).
+    """
     parts = state.rsplit(".", 1)
     if len(parts) != 2:
         return None
     payload_str, sig = parts
     key = get_token().encode("utf-8")
-    expected = hmac.new(key, payload_str.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
+    expected_sig = hmac.new(key, payload_str.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
         return None
     try:
         payload = json.loads(payload_str)
     except (json.JSONDecodeError, ValueError):
         return None
     if payload.get("exp", 0) < int(time.time()):
+        return None
+    # Verify browser binding: nonce in state must match nonce cookie
+    if not expected_nonce or payload.get("nonce") != expected_nonce:
         return None
     return payload.get("return_to", "/")
 
@@ -81,7 +94,7 @@ async def github_login(request: Request, return_to: str = "/") -> RedirectRespon
         raise HTTPException(status_code=501, detail="GitHub OAuth is not configured")
 
     safe_return = _validate_return_to(return_to)
-    state = _sign_state(safe_return)
+    state, nonce = _sign_state(safe_return)
     redirect_uri = f"{settings.api_url}/auth/github/callback"
     url = (
         f"https://github.com/login/oauth/authorize"
@@ -90,19 +103,34 @@ async def github_login(request: Request, return_to: str = "/") -> RedirectRespon
         f"&scope=read:user,user:email"
         f"&state={state}"
     )
-    return RedirectResponse(url)
+    response = RedirectResponse(url)
+    # Set nonce cookie to bind state to this browser (CSRF protection)
+    response.set_cookie(
+        key="sandclaude_oauth_nonce",
+        value=nonce,
+        httponly=True,
+        samesite="lax",
+        secure=settings.api_url.startswith("https"),
+        max_age=_STATE_TTL_S,
+        path="/auth",
+    )
+    return response
 
 
 @router.get("/auth/github/callback")
-async def github_callback(code: str = "", state: str = "") -> RedirectResponse:
+async def github_callback(
+    code: str = "",
+    state: str = "",
+    sandclaude_oauth_nonce: str | None = Cookie(None),
+) -> RedirectResponse:
     """Exchange GitHub OAuth code for access token, then set session cookie."""
     if not _oauth_enabled():
         raise HTTPException(status_code=501, detail="GitHub OAuth is not configured")
     if not code:
         raise HTTPException(status_code=400, detail="Missing code parameter")
 
-    # Verify CSRF state token
-    return_to = _verify_state(state)
+    # Verify CSRF state token + browser-bound nonce cookie
+    return_to = _verify_state(state, sandclaude_oauth_nonce)
     if return_to is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
@@ -163,6 +191,8 @@ async def github_callback(code: str = "", state: str = "") -> RedirectResponse:
         max_age=28800,  # 8 hours
         path="/",
     )
+    # Clear the one-time nonce cookie
+    response.delete_cookie("sandclaude_oauth_nonce", path="/auth")
     return response
 
 

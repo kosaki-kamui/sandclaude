@@ -86,7 +86,9 @@ class TestGitHubLogin:
 
         parsed = urlparse(location)
         state = parse_qs(parsed.query).get("state", [""])[0]
-        return_to = _verify_state(state)
+        # Extract nonce from the response cookie
+        nonce = resp.cookies.get("sandclaude_oauth_nonce", "")
+        return_to = _verify_state(state, nonce)
         assert return_to == "/"  # sanitized, not the hostile URL
 
     async def test_github_returns_501_when_not_configured(self, client: AsyncClient):
@@ -124,26 +126,27 @@ def _mock_github_api(github_username: str = "octocat"):
 
 
 class TestGitHubCallback:
-    def _make_state(self) -> str:
-        """Create a valid signed OAuth state for testing."""
+    def _make_state_and_nonce(self) -> tuple[str, str]:
+        """Create a valid signed OAuth state + nonce for testing."""
         from sandclaude.api.oauth import _sign_state
 
         return _sign_state("/")
 
     async def test_callback_sets_cookie_for_known_user(self, oauth_client: AsyncClient):
-        """Valid code + known GitHub user results in session cookie."""
+        """Valid code + known GitHub user + matching nonce results in session cookie."""
         await db.create_user(
             username="octocat",
             display_name="Octo Cat",
             github_username="octocat",
         )
 
-        state = self._make_state()
+        state, nonce = self._make_state_and_nonce()
         mock_client = _mock_github_api("octocat")
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await oauth_client.get(
                 "/auth/github/callback",
                 params={"code": "valid-code", "state": state},
+                cookies={"sandclaude_oauth_nonce": nonce},
             )
 
         assert resp.status_code == 302
@@ -152,12 +155,13 @@ class TestGitHubCallback:
 
     async def test_callback_unknown_github_user_403(self, oauth_client: AsyncClient):
         """Valid code but no sandclaude user linked to that GitHub user."""
-        state = self._make_state()
+        state, nonce = self._make_state_and_nonce()
         mock_client = _mock_github_api("unknown-gh-user")
         with patch("httpx.AsyncClient", return_value=mock_client):
             resp = await oauth_client.get(
                 "/auth/github/callback",
                 params={"code": "valid-code", "state": state},
+                cookies={"sandclaude_oauth_nonce": nonce},
             )
 
         assert resp.status_code == 403
@@ -172,11 +176,23 @@ class TestGitHubCallback:
         assert resp.status_code == 400
         assert "state" in resp.json()["detail"].lower()
 
-    async def test_callback_rejects_missing_state(self, oauth_client: AsyncClient):
-        """Missing state parameter should be rejected."""
+    async def test_callback_rejects_missing_nonce_cookie(self, oauth_client: AsyncClient):
+        """Valid state but missing nonce cookie should be rejected (CSRF)."""
+        state, _nonce = self._make_state_and_nonce()
         resp = await oauth_client.get(
             "/auth/github/callback",
-            params={"code": "valid-code"},
+            params={"code": "valid-code", "state": state},
+            # No nonce cookie — simulates cross-browser replay
+        )
+        assert resp.status_code == 400
+
+    async def test_callback_rejects_wrong_nonce_cookie(self, oauth_client: AsyncClient):
+        """State with mismatched nonce cookie should be rejected."""
+        state, _nonce = self._make_state_and_nonce()
+        resp = await oauth_client.get(
+            "/auth/github/callback",
+            params={"code": "valid-code", "state": state},
+            cookies={"sandclaude_oauth_nonce": "wrong-nonce"},
         )
         assert resp.status_code == 400
 

@@ -207,13 +207,20 @@ async def list_tasks_endpoint(
     # Primary token also sees legacy tasks with NULL owner_token_hash
     is_primary = caller_fp == token_fingerprint(get_token()) if caller_fp else False
 
-    # v0.3.0: Session auth has empty fingerprint — use user_id instead
-    if caller_fp:
-        tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
-    elif auth.user_id is not None:
-        tasks = await db.list_tasks_for_user(auth.user_id)
-    else:
-        tasks = []
+    # v0.3.0: List by fingerprint + user_id for consistent visibility.
+    # Bearer-auth callers see tasks from all their tokens (same user_id).
+    # Session-auth callers (empty fingerprint) use user_id only.
+    tasks_by_fp = (
+        await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary) if caller_fp else []
+    )
+    tasks_by_user = await db.list_tasks_for_user(auth.user_id) if auth.user_id is not None else []
+    # Merge and deduplicate
+    seen_ids: set[str] = set()
+    tasks = []
+    for t in tasks_by_fp + tasks_by_user:
+        if t.id not in seen_ids:
+            seen_ids.add(t.id)
+            tasks.append(t)
 
     # v0.3.0: Filter by query params
     if status:
