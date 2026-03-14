@@ -30,6 +30,7 @@ router = APIRouter()
 async def create_pr_endpoint(
     task_id: str, body: CreatePRRequest | None = None, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
+    require_scope(auth, "prs:create")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:

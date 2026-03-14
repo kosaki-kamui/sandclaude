@@ -15,7 +15,7 @@ from sandclaude.api.deps import (
     _sanitize_error,
     _validate_task_id,
 )
-from sandclaude.auth import AuthResult
+from sandclaude.auth import AuthResult, require_scope
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import TaskStatus
@@ -31,6 +31,7 @@ async def get_risk_summary_endpoint(
     task_id: str, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
     """Get a structured risk assessment for a completed task."""
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -82,6 +83,7 @@ async def review_task_endpoint(task_id: str, auth: AuthResult = Depends(_require
     Returns risks, missing tests, suspicious changes, and files
     that deserve extra reviewer attention.
     """
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -185,6 +187,7 @@ async def _generate_ai_review(prompt: str, diff: str) -> dict:
 async def get_task_secrets_endpoint(
     task_id: str, auth: AuthResult = Depends(_require_auth)
 ) -> list[dict]:
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:

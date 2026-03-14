@@ -20,7 +20,7 @@ from sandclaude.api.deps import (
     _require_task_owner,
     _validate_task_id,
 )
-from sandclaude.auth import AuthResult, token_fingerprint, verify_token_with_scopes
+from sandclaude.auth import AuthResult, require_scope, token_fingerprint, verify_token_with_scopes
 from sandclaude.config import settings
 from sandclaude.db import store as db
 from sandclaude.models import (
@@ -43,6 +43,7 @@ router = APIRouter()
 async def create_task_endpoint(
     request: TaskCreateRequest, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
+    require_scope(auth, "tasks:create")
     _check_create_rate_limit(auth)
 
     # Validate repo: must be ".", an absolute path, or a secure remote URL
@@ -201,6 +202,7 @@ async def list_tasks_endpoint(
     label: str | None = None,
     repo: str | None = None,
 ) -> list[dict]:
+    require_scope(auth, "tasks:read")
     from sandclaude.auth import get_token
 
     caller_fp = auth.fingerprint
@@ -244,6 +246,7 @@ async def list_tasks_endpoint(
 
 @router.get("/tasks/{task_id}")
 async def get_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -308,6 +311,7 @@ async def get_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_au
 
 @router.get("/tasks/{task_id}/diff")
 async def get_diff_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -330,6 +334,7 @@ async def get_diff_endpoint(task_id: str, auth: AuthResult = Depends(_require_au
 
 @router.get("/tasks/{task_id}/audit")
 async def get_audit_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -352,6 +357,7 @@ async def get_audit_endpoint(task_id: str, auth: AuthResult = Depends(_require_a
 
 @router.get("/tasks/{task_id}/result")
 async def get_result_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -374,6 +380,7 @@ async def get_result_endpoint(task_id: str, auth: AuthResult = Depends(_require_
 
 @router.get("/tasks/{task_id}/transcript")
 async def get_transcript_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)):
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -396,6 +403,7 @@ async def get_transcript_endpoint(task_id: str, auth: AuthResult = Depends(_requ
 
 @router.delete("/tasks/{task_id}")
 async def delete_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
+    require_scope(auth, "tasks:delete")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -425,6 +433,7 @@ async def cancel_task_endpoint(
     body: CancelRequest | None = None,
     auth: AuthResult = Depends(_require_auth),
 ) -> dict:
+    require_scope(auth, "tasks:cancel")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -475,6 +484,7 @@ async def retry_task_endpoint(
     The new task runs against the same repo/branch with a new prompt,
     typically used for addressing review feedback or fixing test failures.
     """
+    require_scope(auth, "tasks:create")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -591,6 +601,7 @@ async def get_task_timeline_endpoint(
     task_id: str, auth: AuthResult = Depends(_require_auth)
 ) -> dict:
     """Get phase breakdown and retry chain for a task."""
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -625,6 +636,7 @@ async def export_bundle_endpoint(task_id: str, auth: AuthResult = Depends(_requi
     policies applied, and outcome metadata — useful for debugging,
     compliance, and incident review.
     """
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
