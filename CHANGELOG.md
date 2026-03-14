@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **approve-and-create-pr scope enforcement** — now requires both `tasks:approve` and `prs:create` scopes (previously only checked `tasks:approve`, allowing PR creation without `prs:create`)
 - **Approval webhook SSRF protection** — double DNS resolution and private-IP validation, matching the existing `send_webhook` protections
 
+### Upgrade Notes
+
+Existing operators upgrading from v0.3.0:
+- **Result semantics changed** — tasks hitting `max_turns` with output are now `partial` (not `completed`). Automations that check `status == "completed"` should also handle `partial`. Use `POST /tasks/{id}/clear-review` before PR creation on partial tasks.
+- **Approval gates now expire** — pending gates auto-reject after 24 hours by default. Set `APPROVAL_EXPIRY_S=0` to preserve v0.3.0 behavior (no expiry). Previously created gates without `expires_at` are unaffected (treated as never-expiring).
+- **Sandbox defaults unchanged** — `SANDBOX_MODE` defaults to `standard`, matching v0.3.0 behavior. Opt in to `strict` for production hardening.
+- **Token rotation available** — use `POST /tokens/{id}/rotate` instead of manual revoke+create for credential updates.
+- **Legacy token warning** — the primary `.token` file still works but now returns an `X-Sandclaude-Deprecation` header. Create scoped tokens via `POST /tokens` for better security.
+
 ## [0.3.0] - 2026-03-13
 
 ### Added

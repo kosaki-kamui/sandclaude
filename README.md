@@ -59,7 +59,58 @@ sandclaude is the bridge between "Claude can code" and "Claude can code *for my 
 - **Rule-based approval policies** - conditional auto-approve/require-approval based on risk level, cost, secrets, repo patterns. Post-execution re-evaluation
 - **Refreshable egress allowlist** - periodic DNS re-resolution during agent execution for long-running tasks with CDN-backed registries
 - **Operator observability** - task timeline with phase durations, error taxonomy, retry lineage, `GET /metrics` for aggregated stats
-- **Deployment doctor** - `GET /admin/doctor` runs health checks on Docker, runner image, gh CLI, templates, API key, network isolation
+- **Deployment doctor** - `GET /admin/doctor` runs health checks on Docker, runner image, gh CLI, templates, API key, network isolation, sandbox mode
+- **Partial task handling** - tasks that hit `max_turns` with output become `partial` (not `failed`), with `review_required` flag and `clear-review` endpoint before PR creation
+- **Sandbox hardening** - `SANDBOX_MODE=strict` adds read-only rootfs, `no-new-privileges`, and capability drop. NET_ADMIN irrevocably dropped from container bounding set after iptables rules applied in both modes
+- **Token rotation** - `POST /tokens/{id}/rotate` for zero-downtime credential rotation. Legacy `.token` usage produces `X-Sandclaude-Deprecation` response header
+- **Approval gate expiry** - pending gates auto-reject after `APPROVAL_EXPIRY_S` (default 24h). Approval/rejection events sent via webhook when `approval` is in `notify_on`
+- **Audit schema versioning** - `schema_version` field for forward compatibility, network requests classified as `observed` vs `inferred`, `operator_summary` with machine-readable counts
+- **Scheduler protocol** - pluggable `Scheduler` interface for swapping the in-process backend (Redis planned for v0.5.0)
+
+### Execution Result Model (v0.4.0)
+
+Tasks can end in one of these terminal statuses:
+
+| Status | Meaning |
+|--------|---------|
+| `completed` | Agent finished successfully. PR creation always allowed. |
+| `partial` | Agent hit `max_turns` but produced a diff. PR creation requires review clearance (`POST /tasks/{id}/clear-review`) or an approved `create_pr` gate. |
+| `timed_out` | Task exceeded `TASK_TIMEOUT_S`. No diff produced. |
+| `failed` | Agent error, setup failure, or cost exceeded. |
+| `cancelled` | Manually cancelled via `POST /tasks/{id}/cancel`. |
+
+Each completed/partial task includes `completion_reason` (`success`, `max_turns`, `cost_exceeded`, etc.) and `review_required` (1 for partial tasks, 0 otherwise).
+
+### Sandbox Hardening (v0.4.0)
+
+Two sandbox modes control container security posture:
+
+| Setting | `standard` (default) | `strict` |
+|---------|---------------------|----------|
+| NET_ADMIN drop | After iptables applied | After iptables applied |
+| Root filesystem | Read-write | Read-only (tmpfs for `/tmp`, `/home/agent`, `/usr/local`, `/var/cache`) |
+| `no-new-privileges` | No | Yes (blocks setuid/setgid escalation) |
+| Package installs | Normal | Work via tmpfs on `/usr/local` |
+
+Set `SANDBOX_MODE=strict` in `.env` for production deployments. The deployment doctor warns when `standard` mode is used in production.
+
+### Token Lifecycle (v0.4.0)
+
+- **Rotate** — `POST /tokens/{id}/rotate` revokes the old token and creates a new one with the same scopes, user, and remaining expiry. The new raw token is returned (shown only once). Use this for scheduled credential rotation without downtime.
+- **Legacy deprecation** — requests using the primary `.token` file receive an `X-Sandclaude-Deprecation` response header encouraging migration to scoped registry tokens.
+
+### Approval Gate Expiry (v0.4.0)
+
+Pending approval gates automatically expire and are rejected after `APPROVAL_EXPIRY_S` (default: 86400 = 24 hours, set to 0 to disable). The `expires_at` field is visible in `GET /tasks/{id}/approvals`. Expired gates are auto-rejected on the next read, and `has_pending_gates` excludes them.
+
+Approval and rejection events are sent via webhook when `approval` is included in the task's `notify_on` list.
+
+### Audit Log Schema (v0.4.0)
+
+The audit log now includes:
+- `schema_version` — currently `"2"`, for forward-compatible parsing
+- `source` on network requests — `"observed"` (from WebFetch/WebSearch tool calls) or `"inferred"` (regex-extracted from bash commands like `curl`, `pip install`)
+- `operator_summary` — machine-readable counts for dashboards: `files_read_count`, `files_written_count`, `commands_count`, `network_observed_count`, `network_inferred_count`, `network_blocked_count`, `blocked_destinations`, `warning_count`
 
 ### Pre-flight Budget Admission
 
@@ -270,16 +321,17 @@ Then use natural language:
 |--------|------------|
 | Code exfiltration | Network isolation in agent phase - only `api.anthropic.com:443` + `allowed_domains` permitted. DNS restricted to Docker resolver. ICMP and IPv6 blocked. |
 | Backdoor injection | All diffs require human review before merge (never auto-merge) |
-| Sandbox escape | Docker container isolation + iptables rules inside container |
+| Sandbox escape | Docker container isolation + iptables rules inside container. NET_ADMIN capability dropped after iptables applied. `strict` mode adds read-only rootfs and `no-new-privileges`. |
 | Credential theft | API key injected via env var, never on disk in container. Git credentials are short-lived. |
 
 ### Audit Trail
 
-Every task produces a structured audit log:
+Every task produces a structured audit log (`schema_version: "2"`):
 - Files read and written (from Claude's tool calls)
 - Shell commands executed (from Bash tool calls)
-- Network requests — best-effort, inferred from tool calls (curl/wget in Bash, WebFetch). Not packet-level capture; container-level network logging is planned for a future release
+- Network requests — classified as `observed` (WebFetch/WebSearch tool calls) or `inferred` (regex from bash commands). Not packet-level capture; container-level network logging is planned for a future release
 - Token consumption and cost
+- `operator_summary` — machine-readable counts for dashboards and alerting
 
 ### What This Does NOT Protect Against
 
@@ -339,6 +391,8 @@ This model works well for startups, small teams, and internal automation. If you
 | `GITHUB_CLIENT_ID` | (none) | GitHub OAuth app client ID for browser-based approval UI login |
 | `GITHUB_CLIENT_SECRET` | (none) | GitHub OAuth app client secret |
 | `EGRESS_REFRESH_INTERVAL_S` | `300` | Seconds between DNS re-resolution for allowed_domains during agent execution (0 = disable) |
+| `SANDBOX_MODE` | `standard` | Container sandbox profile: `standard` (NET_ADMIN dropped) or `strict` (+ read-only rootfs, no-new-privileges) |
+| `APPROVAL_EXPIRY_S` | `86400` | Approval gate expiry in seconds (0 = never expires). Pending gates auto-rejected after this duration |
 
 ## Demo
 

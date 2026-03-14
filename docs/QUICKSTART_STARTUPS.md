@@ -235,9 +235,47 @@ in the Getting Started guide.
 
 ---
 
+## v0.4.0 Operator Guidance
+
+### Enable strict sandbox mode (recommended for production)
+```bash
+# In .env
+SANDBOX_MODE=strict
+```
+Strict mode adds read-only rootfs and `no-new-privileges` to containers. Package installs still work via tmpfs. The deployment doctor (`GET /admin/doctor`) warns if `standard` is used in production.
+
+### Set up GitHub OAuth for the approval UI
+If your team reviews PRs via the browser-based approval page, enable GitHub OAuth so reviewers can approve with one click instead of pasting API tokens:
+```bash
+# In .env
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+```
+Create a GitHub OAuth App at https://github.com/settings/developers with callback URL `{API_URL}/auth/github/callback`.
+
+### Rotate tokens instead of recreating
+When a token is nearing expiry, rotate it for zero-downtime credential updates:
+```bash
+# Rotate token ID 3 — old token revoked, new token returned
+curl -s -X POST $HOST/tokens/3/rotate \
+  -H "Authorization: Bearer $TOKEN" | jq .new_token.token
+# Update the rotated token in your CI secrets / client config
+```
+The new token inherits the same scopes, user, and remaining expiry.
+
+### Handle partial tasks
+Tasks that hit `max_turns` but produce output now end as `partial` instead of `completed`. Before creating a PR from a partial task:
+```bash
+# Review the diff
+curl -s $HOST/tasks/$TASK_ID/diff -H "Authorization: Bearer $TOKEN"
+# Clear review flag, then create PR
+curl -s -X POST $HOST/tasks/$TASK_ID/clear-review -H "Authorization: Bearer $TOKEN"
+curl -s -X POST $HOST/tasks/$TASK_ID/create-pr -H "Authorization: Bearer $TOKEN"
+```
+
 ## Next Steps
 
 - **Slack notifications:** Add `"notify": {"webhook": "https://hooks.slack.com/..."}` to task submissions
 - **MCP plugin:** Use sandclaude from inside Claude Code (see [Getting Started](GETTING_STARTED.md))
 - **More presets:** Create presets for your team's common workflows
-- **Token rotation:** Set `expires_in_days` and create new tokens before old ones expire
+- **Token rotation:** Use `POST /tokens/{id}/rotate` for zero-downtime credential updates

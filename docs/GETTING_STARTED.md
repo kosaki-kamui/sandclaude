@@ -591,5 +591,19 @@ Your `GIT_TOKEN` needs write access for PR creation: Contents: Read and write + 
 - Be explicit: say "Use cloud_submit to submit a sandclaude task" rather than just "submit a task"
 - Type `/mcp` in Claude Code to verify the connection
 
-### Task completes with `error_max_turns` but has a diff
-This is normal — the agent ran out of turns but completed the work. sandclaude treats this as `completed` (not `failed`) when a non-empty diff was produced. Increase `max_turns` if you want the agent to have more room.
+### Task ends as `partial` with `completion_reason: max_turns`
+This means the agent hit `max_turns` but produced a diff. In v0.4.0, these tasks are `partial` (not `completed`) and require review clearance before PR creation:
+
+```bash
+# Check what the agent produced
+curl -s $HOST/tasks/$TASK_ID/diff -H "Authorization: Bearer $TOKEN"
+
+# If the diff looks good, clear review and create the PR
+curl -s -X POST $HOST/tasks/$TASK_ID/clear-review -H "Authorization: Bearer $TOKEN"
+curl -s -X POST $HOST/tasks/$TASK_ID/create-pr -H "Authorization: Bearer $TOKEN"
+```
+
+Increase `max_turns` if your tasks consistently hit the limit.
+
+### Approval gates expired before I could review
+By default, pending approval gates expire after 24 hours (`APPROVAL_EXPIRY_S=86400`). Expired gates are auto-rejected. To extend or disable, set `APPROVAL_EXPIRY_S=0` (never expires) or increase the value in `.env`. Resubmit the task if the gate expired.
