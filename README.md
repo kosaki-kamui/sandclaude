@@ -217,12 +217,14 @@ All endpoints require `Authorization: Bearer <token>` (except `/health`). WebSoc
 | `GET` | `/tasks/{task_id}/approvals` | List approval gates |
 | `POST` | `/tasks/{task_id}/approve/{action}` | Approve a gate (requires `tasks:approve`) |
 | `POST` | `/tasks/{task_id}/reject/{action}` | Reject a gate (requires `tasks:approve`) |
-| `POST` | `/tasks/{task_id}/approve-and-create-pr` | Approve gate + create PR in one step |
+| `POST` | `/tasks/{task_id}/approve-and-create-pr` | Approve gate + create PR in one step (requires `tasks:approve` + `prs:create`) |
+| `POST` | `/tasks/{task_id}/clear-review` | Clear review flag on partial task (requires `tasks:approve`) |
 | `POST` | `/tasks/{task_id}/approval-link/{action}` | Generate signed approval link |
 | `GET` | `/approve/{task_id}/{action}` | Server-rendered approval page |
 | `POST` | `/tokens` | Create a scoped token (requires `admin:tokens`) |
 | `GET` | `/tokens` | List tokens (requires `admin:tokens`) |
 | `POST` | `/tokens/{token_id}/revoke` | Revoke a token (requires `admin:tokens`) |
+| `POST` | `/tokens/{token_id}/rotate` | Rotate a token — revoke old + create new (requires `admin:tokens`) |
 | `PUT` | `/policies/{name}` | Create/update policy preset (requires `admin:policies`) |
 | `GET` | `/policies` | List policy presets (requires `admin:policies`) |
 | `GET` | `/policies/{name}` | Get policy preset (requires `admin:policies`) |

@@ -90,11 +90,13 @@ async def approve_and_create_pr_endpoint(
 ) -> dict:
     """Approve the create_pr gate and create the PR in one step.
 
-    Requires tasks:approve scope. If the gate is already approved,
-    skips the approval step and creates the PR directly. If rejected,
-    returns 403. If no create_pr gate exists, creates the PR directly.
+    Requires both tasks:approve and prs:create scopes. If the gate is
+    already approved, skips the approval step and creates the PR directly.
+    If rejected, returns 403. If no create_pr gate exists, creates the
+    PR directly.
     """
     require_scope(auth, "tasks:approve")
+    require_scope(auth, "prs:create")
 
     _validate_task_id(task_id)
     task = await db.get_task(task_id)

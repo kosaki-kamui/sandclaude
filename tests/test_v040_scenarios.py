@@ -285,3 +285,64 @@ class TestSchedulerProtocol:
 
         stats = await get_scheduler().stats()
         assert set(stats.keys()) == {"max_concurrent", "active", "queued"}
+
+
+# ── Security fix: approve-and-create-pr requires prs:create ──────────
+
+
+class TestApproveAndCreatePrScope:
+    async def test_approve_and_create_pr_requires_prs_create(self, client):
+        """Token with tasks:approve but NOT prs:create should be rejected."""
+        from sandclaude.auth import generate_token, token_fingerprint
+
+        # Create a token with tasks:approve but no prs:create
+        raw = generate_token()
+        await db.create_token(
+            name="approve-only",
+            token_hash=token_fingerprint(raw),
+            scopes=["tasks:approve", "tasks:read", "tasks:create"],
+        )
+
+        await db.create_task(
+            task_id="scope-test-1",
+            repo="https://github.com/test/repo",
+            prompt="test",
+        )
+        await db.update_task("scope-test-1", status=TaskStatus.completed)
+
+        resp = await client.post(
+            "/tasks/scope-test-1/approve-and-create-pr",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert resp.status_code == 403
+        assert "prs:create" in resp.json()["detail"]
+
+    async def test_approve_and_create_pr_works_with_both_scopes(self, client):
+        """Token with both tasks:approve + prs:create should pass scope check."""
+        from unittest.mock import AsyncMock, patch
+
+        from sandclaude.auth import generate_token, token_fingerprint
+
+        raw = generate_token()
+        await db.create_token(
+            name="full-pr",
+            token_hash=token_fingerprint(raw),
+            scopes=["tasks:approve", "prs:create", "tasks:read"],
+        )
+
+        await db.create_task(
+            task_id="scope-test-2",
+            repo="https://github.com/test/repo",
+            prompt="test",
+        )
+        await db.update_task("scope-test-2", status=TaskStatus.completed)
+
+        # Mock create_pr to avoid needing real GitHub
+        with patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock) as mock_pr:
+            mock_pr.return_value = {"pr_url": "https://github.com/test/repo/pull/1"}
+            resp = await client.post(
+                "/tasks/scope-test-2/approve-and-create-pr",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+            # Should pass scope check (may fail on PR creation details, but not 403)
+            assert resp.status_code != 403

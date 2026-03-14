@@ -5,6 +5,28 @@ All notable changes to sandclaude will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-14
+
+### Added
+
+- **Sandbox privilege reduction** — NET_ADMIN capability irrevocably dropped from container bounding set (via `prctl`) after iptables rules applied. New `SANDBOX_MODE` config: `standard` (default) drops NET_ADMIN; `strict` adds read-only rootfs, tmpfs for writable paths, and `no-new-privileges`
+- **Audit clarity** — `schema_version` field on AuditLog for forward compatibility, network requests classified as `observed` (tool calls) vs `inferred` (regex from bash commands), `operator_summary` with machine-readable counts for dashboards
+- **Scheduler protocol** — `Scheduler` protocol extracted from pool.py so the in-process semaphore backend (`LocalScheduler`) can be swapped for Redis or other distributed backends. Module-level API preserved for backward compatibility
+- **Approval gate expiry** — pending gates auto-rejected after `APPROVAL_EXPIRY_S` (default 24h, 0 to disable). `expires_at` field on approval gates. `has_pending_gates` excludes expired gates
+- **Approval webhooks** — `send_approval_webhook` fires on gate approval/rejection when `approval` is in `notify_on` events. HTTPS + double-DNS SSRF protection matches `send_webhook`
+- **Token rotation** — `POST /tokens/{id}/rotate` revokes old token and creates a new one with same scopes/user/remaining expiry. Zero-downtime credential rotation
+- **Legacy token deprecation** — `X-Sandclaude-Deprecation` response header added when legacy `.token` file tokens are used, encouraging migration to scoped registry tokens
+- **Execution result model** — `partial` and `timed_out` task statuses, `completion_reason` and `review_required` fields, `POST /tasks/{id}/clear-review` endpoint, PR creation gated on review clearance for partial tasks
+
+### Changed
+
+- **Version bumped to 0.4.0** — pyproject.toml, health endpoint, API title, bundle export, approval UI footer
+
+### Security
+
+- **approve-and-create-pr scope enforcement** — now requires both `tasks:approve` and `prs:create` scopes (previously only checked `tasks:approve`, allowing PR creation without `prs:create`)
+- **Approval webhook SSRF protection** — double DNS resolution and private-IP validation, matching the existing `send_webhook` protections
+
 ## [0.3.0] - 2026-03-13
 
 ### Added

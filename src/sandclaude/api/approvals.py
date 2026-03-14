@@ -104,6 +104,11 @@ async def approve_action_endpoint(
             )
             task = await db.get_task(task_id)
             if task:
+                # v0.4.0: Send approval webhook before resuming execution
+                try:
+                    await send_approval_webhook(task, action, "approval_approved")
+                except Exception as exc:
+                    logger.warning("Approval webhook failed for %s: %s", task_id, exc)
                 await submit_task(task)
             return {
                 "status": "approved",

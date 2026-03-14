@@ -312,12 +312,33 @@ async def send_approval_webhook(task: Task, action: str, event: str) -> None:
     if event not in events and "approval" not in events:
         return
 
-    # HTTPS enforcement (same policy as send_webhook)
+    # HTTPS + SSRF enforcement (same policy as send_webhook)
     env_name = settings.environment.strip().lower()
     if env_name not in {"test", "dev", "development"}:
         if not task.notify_webhook.startswith("https://"):
             logger.warning(
                 "BLOCKED: %s is not HTTPS (approval webhook for task %s)",
+                _redact_url(task.notify_webhook),
+                task.id,
+            )
+            return
+        # Double DNS resolution to catch rebinding (same as send_webhook)
+        import asyncio as _asyncio
+
+        ip1 = _resolve_safe_webhook_ip(task.notify_webhook)
+        if ip1 is None:
+            logger.warning(
+                "BLOCKED: %s resolves to private/local IP (approval webhook for task %s)",
+                _redact_url(task.notify_webhook),
+                task.id,
+            )
+            return
+        await _asyncio.sleep(0.1)
+        ip2 = _resolve_safe_webhook_ip(task.notify_webhook)
+        if ip2 is None:
+            logger.warning(
+                "BLOCKED: %s second DNS resolution returned private/local IP "
+                "(possible rebinding, approval webhook for task %s)",
                 _redact_url(task.notify_webhook),
                 task.id,
             )
