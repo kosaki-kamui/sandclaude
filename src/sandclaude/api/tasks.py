@@ -95,6 +95,7 @@ async def create_task_endpoint(
         policy_preset=request.policy_preset,
         declared_secrets=request.declared_secrets,
         cost_budget_usd=request.cost_budget_usd,
+        labels=request.labels,
     )
 
     # Resolve effective policy (but do NOT create post-execution gates yet —
@@ -193,13 +194,34 @@ async def create_task_endpoint(
 
 
 @router.get("/tasks")
-async def list_tasks_endpoint(auth: AuthResult = Depends(_require_auth)) -> list[dict]:
+async def list_tasks_endpoint(
+    auth: AuthResult = Depends(_require_auth),
+    status: str | None = None,
+    preset: str | None = None,
+    label: str | None = None,
+    repo: str | None = None,
+) -> list[dict]:
     from sandclaude.auth import get_token
 
     caller_fp = auth.fingerprint
     # Primary token also sees legacy tasks with NULL owner_token_hash
     is_primary = caller_fp == token_fingerprint(get_token())
     tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
+
+    # v0.3.0: Filter by query params
+    if status:
+        tasks = [t for t in tasks if t.status.value == status]
+    if preset:
+        tasks = [t for t in tasks if t.policy_preset == preset]
+    if repo:
+        tasks = [t for t in tasks if t.repo == repo]
+    if label:
+        import json as _json
+
+        tasks = [
+            t for t in tasks if t.labels and label in (_json.loads(t.labels) if t.labels else [])
+        ]
+
     return [t.safe_dump() for t in tasks]  # S11: exclude internal fields
 
 
@@ -379,8 +401,16 @@ async def delete_task_endpoint(task_id: str, auth: AuthResult = Depends(_require
 # ── POST /tasks/{task_id}/cancel ───────────────────────────────
 
 
+class CancelRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
+async def cancel_task_endpoint(
+    task_id: str,
+    body: CancelRequest | None = None,
+    auth: AuthResult = Depends(_require_auth),
+) -> dict:
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -395,6 +425,13 @@ async def cancel_task_endpoint(task_id: str, auth: AuthResult = Depends(_require
 
     ok = await cancel_container(task)
     if ok:
+        # v0.3.0: Record cancel reason if provided
+        if body and body.reason:
+            await db.update_task(
+                task.id,
+                cancel_reason=body.reason,
+                error_category="cancelled",
+            )
         return {"status": "cancelled", "task_id": task.id}
     # Conditional update returned False — task status changed concurrently
     fresh = await db.get_task(task_id)

@@ -94,6 +94,7 @@ class TaskCreateRequest(BaseModel):
     policy_preset: str | None = Field(None, max_length=64)
     declared_secrets: list[str] | None = None  # secret names this task needs
     cost_budget_usd: float | None = Field(None, ge=0.0, le=10000.0)
+    labels: list[str] | None = None  # v0.3.0: searchable tags
 
     @field_validator("repo")
     @classmethod
@@ -171,6 +172,8 @@ class Task(BaseModel):
     agent_started_at: str | None = None
     error_category: str | None = None
     parent_task_id: str | None = None
+    labels: str | None = None  # JSON-encoded list of tags
+    cancel_reason: str | None = None
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""

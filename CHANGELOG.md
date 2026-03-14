@@ -5,6 +5,26 @@ All notable changes to sandclaude will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-13
+
+### Added
+
+- **Identity-bound auth model** — users table with admin-only creation, tokens belong to users, audit trails record `created_by_user_id` and `decided_by_user_id` instead of just token fingerprints
+- **Bootstrap admin user** — auto-created at startup, legacy tokens map to admin, orphan tokens linked automatically
+- **GitHub OAuth for approval UI** — browser-based login via GitHub, session cookies (8h TTL, HMAC-signed), approve/reject without pasting API tokens. Optional — falls back to token-paste when `GITHUB_CLIENT_ID` is not set
+- **Token-user binding** — `POST /tokens` accepts `user_id`, scope ceiling enforced (non-legacy tokens can't grant scopes they don't have)
+- **Refreshable egress allowlist** — periodically re-resolves `allowed_domains` during agent execution and appends newly discovered IPs to iptables without disrupting in-flight connections. Configurable via `EGRESS_REFRESH_INTERVAL_S` (default 300s, 0 to disable)
+- **Rule-based approval policy engine** — presets support `approval_rules` with conditions (`risk_level`, `predicted_cost_below`, `has_secrets`, `repo_matches`, `preset`). Auto-approve for safe cases, require approval for risky ones. Post-execution re-evaluation when risk becomes known
+- **Operator observability** — task timeline with phase durations (`setup_completed_at`, `agent_started_at`), error taxonomy (`error_category`), retry lineage (`parent_task_id`), `GET /metrics` endpoint with aggregated stats, `GET /tasks/{id}/timeline` endpoint
+- **Deployment doctor** — `GET /admin/doctor` runs 8 health checks (Docker, runner image, gh CLI, templates, API key, data dir, OAuth config, network isolation) with pass/warn/fail status and actionable messages
+- **User management API** — `POST/GET/DELETE /users` with `admin:users` scope
+
+### Changed
+
+- **API refactored into domain routers** — `main.py` split from 1600 lines into 9 focused modules (tasks, approvals, prs, tokens, policies, review, system, users, oauth) with shared `deps.py`
+- **`_require_auth` returns `AuthResult`** — eliminates double token verification across all routes, makes user identity available everywhere
+- **Version bumped to 0.3.0** — pyproject.toml, health endpoint, API title
+
 ## [0.2.5] - 2026-03-12
 
 ### Added
@@ -71,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker socket proxy** — never mounts Docker socket directly into the API container
 - **gosu-based entrypoint** — proper privilege drop for bind-mount ownership fixes
 
+[0.3.0]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.3.0
 [0.2.5]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.2.5
 [0.2.0]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kosaki-kamui/sandclaude/releases/tag/v0.1.0

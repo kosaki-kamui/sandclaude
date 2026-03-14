@@ -155,6 +155,8 @@ async def init_db() -> None:
             ("agent_started_at", "TEXT"),
             ("error_category", "TEXT"),
             ("parent_task_id", "TEXT"),
+            ("labels", "TEXT"),
+            ("cancel_reason", "TEXT"),
         ]:
             if obs_col not in task_cols_v3:
                 await db.execute(f"ALTER TABLE tasks ADD COLUMN {obs_col} {obs_type}")
@@ -203,19 +205,21 @@ async def create_task(
     cost_budget_usd: float | None = None,
     created_by_user_id: int | None = None,
     parent_task_id: str | None = None,
+    labels: list[str] | None = None,
 ) -> Task:
     now = datetime.now(timezone.utc).isoformat()
     allowed_domains_json = json.dumps(allowed_domains) if allowed_domains else None
     notify_on_json = json.dumps(notify_on) if notify_on else None
     declared_secrets_json = json.dumps(declared_secrets) if declared_secrets else None
+    labels_json = json.dumps(labels) if labels else None
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """INSERT INTO tasks
                (id, status, repo, branch, prompt, model, max_turns, priority,
                 owner_token_hash, host_cwd, allowed_domains, notify_webhook, notify_on,
                 policy_preset, declared_secrets, cost_budget_usd, created_by_user_id,
-                parent_task_id, created_at)
-               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                parent_task_id, labels, created_at)
+               VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 repo,
@@ -234,6 +238,7 @@ async def create_task(
                 cost_budget_usd,
                 created_by_user_id,
                 parent_task_id,
+                labels_json,
                 now,
             ),
         )
@@ -302,6 +307,7 @@ async def update_task(
     setup_completed_at: str | None = None,
     agent_started_at: str | None = None,
     error_category: str | None = None,
+    cancel_reason: str | None = None,
 ) -> None:
     sets: list[str] = []
     vals: list[object] = []
@@ -345,6 +351,9 @@ async def update_task(
     if error_category is not None:
         sets.append("error_category = ?")
         vals.append(error_category)
+    if cancel_reason is not None:
+        sets.append("cancel_reason = ?")
+        vals.append(cancel_reason)
 
     if not sets:
         return
@@ -510,6 +519,8 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         agent_started_at=row["agent_started_at"] if "agent_started_at" in keys else None,
         error_category=row["error_category"] if "error_category" in keys else None,
         parent_task_id=row["parent_task_id"] if "parent_task_id" in keys else None,
+        labels=row["labels"] if "labels" in keys else None,
+        cancel_reason=row["cancel_reason"] if "cancel_reason" in keys else None,
     )
 
 

@@ -55,6 +55,11 @@ sandclaude is the bridge between "Claude can code" and "Claude can code *for my 
 - **AI code review** - `POST /tasks/{id}/review` for structured review of completed diffs
 - **Secrets management** - tasks declare needed secrets, server injects per policy, audit records names (never values)
 - **Pre-flight budget estimation** - estimates task cost before execution using model pricing + max_turns; model-assisted Haiku estimation for gray-zone tasks; rejects, warns, or gates on budget cap
+- **Identity-bound auth** - users, service accounts, tokens belong to users, audit trails show who (not just which token). GitHub OAuth for browser-based approval UI
+- **Rule-based approval policies** - conditional auto-approve/require-approval based on risk level, cost, secrets, repo patterns. Post-execution re-evaluation
+- **Refreshable egress allowlist** - periodic DNS re-resolution during agent execution for long-running tasks with CDN-backed registries
+- **Operator observability** - task timeline with phase durations, error taxonomy, retry lineage, `GET /metrics` for aggregated stats
+- **Deployment doctor** - `GET /admin/doctor` runs health checks on Docker, runner image, gh CLI, templates, API key, network isolation
 
 ### Pre-flight Budget Admission
 
@@ -224,6 +229,17 @@ All endpoints require `Authorization: Bearer <token>` (except `/health`). WebSoc
 | `DELETE` | `/policies/{name}` | Delete policy preset (requires `admin:policies`) |
 | `WS` | `/tasks/{task_id}/stream` | Real-time task log streaming (Bearer auth) |
 | `GET` | `/pool` | Runner pool stats (active, queued, max) |
+| `GET` | `/metrics` | Aggregated task metrics (status, cost, timing, errors) |
+| `GET` | `/tasks/{task_id}/timeline` | Phase breakdown + retry chain |
+| `POST` | `/users` | Create user (requires `admin:users`) |
+| `GET` | `/users` | List users (requires `admin:users`) |
+| `GET` | `/users/{user_id}` | Get user (requires `admin:users`) |
+| `DELETE` | `/users/{user_id}` | Delete user (requires `admin:users`) |
+| `GET` | `/auth/github` | GitHub OAuth login redirect |
+| `GET` | `/auth/github/callback` | GitHub OAuth callback |
+| `GET` | `/auth/me` | Current session user info |
+| `POST` | `/auth/logout` | Clear session cookie |
+| `GET` | `/admin/doctor` | Deployment health checks |
 | `GET` | `/health` | Health check (no auth) |
 
 ## Claude Code Plugin (MCP)
@@ -307,6 +323,9 @@ Every task produces a structured audit log:
 | `ALLOWED_REPO_BASE` | (none) | Comma-separated allowed base dirs for local repo mounts (required in production if not using `HOST_CWD`) |
 | `WEBHOOK_INCLUDE_PROMPT` | `false` | Include task prompt excerpt in webhook payloads (off by default for privacy) |
 | `SECRET_*` | (none) | Injectable secrets for tasks (e.g., `SECRET_NPM_TOKEN=npm_abc123`). Tasks declare what they need; server resolves from these env vars per policy. |
+| `GITHUB_CLIENT_ID` | (none) | GitHub OAuth app client ID for browser-based approval UI login |
+| `GITHUB_CLIENT_SECRET` | (none) | GitHub OAuth app client secret |
+| `EGRESS_REFRESH_INTERVAL_S` | `300` | Seconds between DNS re-resolution for allowed_domains during agent execution (0 = disable) |
 
 ## Demo
 
