@@ -1,6 +1,8 @@
-"""Token management routes (v0.2.0, extended v0.3.0 with user binding)."""
+"""Token management routes (v0.2.0, extended v0.3.0 with user binding, v0.4.0 rotation)."""
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -23,8 +25,6 @@ async def create_token_endpoint(
 ) -> dict:
     # Only admin-scoped tokens can create new tokens
     require_scope(auth, "admin:tokens")
-
-    from datetime import datetime, timedelta, timezone
 
     # v0.3.0: Determine which user owns the new token
     target_user_id = request.user_id or auth.user_id
@@ -98,3 +98,57 @@ async def revoke_token_endpoint(token_id: int, auth: AuthResult = Depends(_requi
     if not ok:
         raise HTTPException(status_code=404, detail="Token not found or already revoked")
     return {"revoked": token_id}
+
+
+@router.post("/tokens/{token_id}/rotate")
+async def rotate_token_endpoint(token_id: int, auth: AuthResult = Depends(_require_auth)) -> dict:
+    """Rotate a token: revoke the old one and create a new one with the same config.
+
+    Returns the new raw token (shown only once). The old token is immediately
+    revoked and can no longer be used.
+    """
+    require_scope(auth, "admin:tokens")
+
+    # Look up the old token
+    tokens = await db.list_tokens()
+    old = next((t for t in tokens if t.id == token_id), None)
+    if not old:
+        raise HTTPException(status_code=404, detail="Token not found")
+    if not old.is_active():
+        raise HTTPException(status_code=409, detail="Cannot rotate a revoked or expired token")
+
+    # Revoke the old token
+    await db.revoke_token(token_id)
+
+    # Create a new token with the same scopes, user, and name
+    raw_token = generate_token()
+    fp = token_fingerprint(raw_token)
+
+    # Preserve remaining expiry if the old token had one
+    new_expires_at: str | None = None
+    if old.expires_at:
+        old_exp = datetime.fromisoformat(old.expires_at.replace("Z", "+00:00"))
+        remaining = old_exp - datetime.now(timezone.utc)
+        if remaining.total_seconds() > 0:
+            new_expires_at = (datetime.now(timezone.utc) + remaining).isoformat()
+
+    new_token = await db.create_token(
+        name=f"{old.name} (rotated)",
+        token_hash=fp,
+        scopes=old.scopes,
+        expires_at=new_expires_at,
+        created_by=auth.fingerprint,
+        user_id=old.user_id,
+    )
+
+    return {
+        "rotated_from": token_id,
+        "new_token": TokenCreateResponse(
+            id=new_token.id,
+            name=new_token.name,
+            token=raw_token,
+            scopes=new_token.scopes,
+            created_at=new_token.created_at,
+            expires_at=new_token.expires_at,
+        ).model_dump(),
+    }

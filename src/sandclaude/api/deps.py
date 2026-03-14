@@ -10,9 +10,11 @@ import json
 import re
 import time
 from collections import defaultdict, deque
+from typing import Any, MutableMapping
 
-from fastapi import Cookie, Depends, HTTPException
+from fastapi import Cookie, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sandclaude.auth import AuthResult, token_fingerprint, verify_token_with_scopes
 
@@ -79,20 +81,60 @@ def _sanitize_error(exc: Exception) -> str:
 
 
 async def _require_auth(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     sandclaude_session: str | None = Cookie(None),
 ) -> AuthResult:
     # v0.2.0: Accept bearer tokens (legacy + registry)
     if credentials is not None:
-        return await verify_token_with_scopes(credentials.credentials)
+        result = await verify_token_with_scopes(credentials.credentials)
+        # v0.4.0: Flag legacy tokens for deprecation header
+        if result.is_legacy:
+            request.state.legacy_token = True
+        return result
     # v0.3.0: Fall back to session cookie (GitHub OAuth)
     if sandclaude_session:
         from sandclaude.auth import verify_session_cookie
 
-        result = verify_session_cookie(sandclaude_session)
-        if result:
-            return result
+        session_result = verify_session_cookie(sandclaude_session)
+        if session_result:
+            return session_result
     raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+
+class LegacyTokenDeprecationMiddleware:
+    """v0.4.0: Add Deprecation header when legacy tokens are used.
+
+    Legacy tokens (the primary .token file or AUTH_TOKENS env var) grant
+    full admin access without scopes. Operators should migrate to scoped
+    registry tokens created via POST /tokens.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+
+        async def send_with_deprecation(message: MutableMapping[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                if getattr(request.state, "legacy_token", False):
+                    headers = list(message.get("headers", []))
+                    headers.append(
+                        (
+                            b"x-sandclaude-deprecation",
+                            b"Legacy token in use. Create a scoped token "
+                            b"via POST /tokens for better security.",
+                        )
+                    )
+                    message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_deprecation)
 
 
 def _validate_task_id(task_id: str) -> None:

@@ -19,7 +19,7 @@ router = APIRouter()
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.4.0"}
 
 
 @router.get("/pool", dependencies=[Depends(_require_auth)])

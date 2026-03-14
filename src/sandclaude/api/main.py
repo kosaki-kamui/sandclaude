@@ -20,7 +20,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from sandclaude.api.approvals import router as approvals_router
-from sandclaude.api.deps import CREATE_RATE_LIMIT_MAX_REQUESTS, _create_rate_buckets
+from sandclaude.api.deps import (
+    CREATE_RATE_LIMIT_MAX_REQUESTS,
+    LegacyTokenDeprecationMiddleware,
+    _create_rate_buckets,
+)
 from sandclaude.api.oauth import router as oauth_router
 from sandclaude.api.policies import router as policies_router
 from sandclaude.api.prs import router as prs_router
@@ -144,7 +148,10 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="sandclaude", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="sandclaude", version="0.4.0", lifespan=lifespan)
+
+# v0.4.0: Legacy token deprecation header
+app.add_middleware(LegacyTokenDeprecationMiddleware)
 
 # Register routers (no prefix — all routes stay at their current paths)
 app.include_router(system_router)
