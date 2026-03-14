@@ -159,6 +159,7 @@ async def github_callback(code: str = "", state: str = "") -> RedirectResponse:
         value=cookie_value,
         httponly=True,
         samesite="lax",
+        secure=settings.api_url.startswith("https"),
         max_age=28800,  # 8 hours
         path="/",
     )

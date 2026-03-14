@@ -205,8 +205,15 @@ async def list_tasks_endpoint(
 
     caller_fp = auth.fingerprint
     # Primary token also sees legacy tasks with NULL owner_token_hash
-    is_primary = caller_fp == token_fingerprint(get_token())
-    tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
+    is_primary = caller_fp == token_fingerprint(get_token()) if caller_fp else False
+
+    # v0.3.0: Session auth has empty fingerprint — use user_id instead
+    if caller_fp:
+        tasks = await db.list_tasks_for_owner(caller_fp, include_unowned=is_primary)
+    elif auth.user_id is not None:
+        tasks = await db.list_tasks_for_user(auth.user_id)
+    else:
+        tasks = []
 
     # v0.3.0: Filter by query params
     if status:

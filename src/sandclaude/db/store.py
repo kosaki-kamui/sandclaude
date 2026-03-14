@@ -291,6 +291,18 @@ async def list_tasks_for_owner(
         return [_row_to_task(r) for r in rows]
 
 
+async def list_tasks_for_user(user_id: int) -> list[Task]:
+    """List tasks created by a specific user (for session auth)."""
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM tasks WHERE created_by_user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_task(r) for r in rows]
+
+
 async def update_task(
     task_id: str,
     *,
@@ -884,6 +896,21 @@ async def link_orphan_tokens_to_user(user_id: int) -> int:
     async with aiosqlite.connect(_db_path()) as conn:
         cursor = await conn.execute(
             "UPDATE tokens SET user_id = ? WHERE user_id IS NULL", (user_id,)
+        )
+        await conn.commit()
+        return cursor.rowcount
+
+
+async def backfill_task_user_ids(admin_user_id: int) -> int:
+    """Backfill tasks missing created_by_user_id with the admin user.
+
+    Pre-upgrade tasks have owner_token_hash but no created_by_user_id.
+    This assigns them to the admin so session-based ownership works.
+    """
+    async with aiosqlite.connect(_db_path()) as conn:
+        cursor = await conn.execute(
+            "UPDATE tasks SET created_by_user_id = ? WHERE created_by_user_id IS NULL",
+            (admin_user_id,),
         )
         await conn.commit()
         return cursor.rowcount
