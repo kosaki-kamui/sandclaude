@@ -22,6 +22,7 @@ from sandclaude.models import (
     TaskStatus,
 )
 from sandclaude.runner.pool import submit_task
+from sandclaude.runner.webhook import send_approval_webhook
 
 from .deps import _require_auth, _require_task_owner, _validate_task_id
 
@@ -115,6 +116,14 @@ async def approve_action_endpoint(
     if not await db.has_pending_gates(task_id):
         await db.update_task(task_id, requires_approval=0)
 
+    # v0.4.0: Send approval webhook
+    task = await db.get_task(task_id)
+    if task:
+        try:
+            await send_approval_webhook(task, action, "approval_approved")
+        except Exception as exc:
+            logger.warning("Approval webhook failed for %s: %s", task_id, exc)
+
     return {"status": "approved", "task_id": task_id, "action": action}
 
 
@@ -156,6 +165,14 @@ async def reject_action_endpoint(
             error_category="approval_rejected",
             requires_approval=0,
         )
+
+    # v0.4.0: Send rejection webhook
+    task = await db.get_task(task_id)
+    if task:
+        try:
+            await send_approval_webhook(task, action, "approval_rejected")
+        except Exception as exc:
+            logger.warning("Approval webhook failed for %s: %s", task_id, exc)
 
     return {"status": "rejected", "task_id": task_id, "action": action}
 

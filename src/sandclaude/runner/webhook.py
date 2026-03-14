@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -291,6 +292,57 @@ def _build_slack_payload(task: Task, audit: dict, duration: str, diff: str) -> d
             }
         ],
     }
+
+
+async def send_approval_webhook(task: Task, action: str, event: str) -> None:
+    """Send webhook notification for approval gate events.
+
+    event: 'approval_pending', 'approval_approved', 'approval_rejected', 'approval_expired'
+    """
+    if not task.notify_webhook:
+        return
+
+    # Check if 'approval_pending' (or specific event) is in notify_on
+    try:
+        events: list[str] = json.loads(task.notify_on) if task.notify_on else []
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    # Allow explicit event match or wildcard 'approval'
+    if event not in events and "approval" not in events:
+        return
+
+    is_slack = "hooks.slack.com" in task.notify_webhook
+    payload: dict[str, Any] = {}
+    if is_slack:
+        payload = {
+            "text": f":bell: sandclaude task `{task.id}` — {event} for `{action}`",
+        }
+    else:
+        payload = {
+            "event": event,
+            "task": {"id": task.id, "repo": task.repo, "status": task.status.value},
+            "approval": {"action": action},
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(task.notify_webhook, json=payload)
+            if resp.is_success:
+                logger.info(
+                    "Approval webhook sent (%s) for task %s",
+                    event,
+                    task.id,
+                )
+            else:
+                logger.warning(
+                    "Approval webhook failed (%s) for %s: %s",
+                    event,
+                    task.id,
+                    resp.status_code,
+                )
+    except Exception as exc:
+        logger.error("Approval webhook error: %s", exc)
 
 
 def _calc_duration(task: Task) -> str:

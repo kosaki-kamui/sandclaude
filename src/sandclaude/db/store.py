@@ -148,6 +148,8 @@ async def init_db() -> None:
         gate_cols = {row[1] for row in await cursor.fetchall()}
         if "decided_by_user_id" not in gate_cols:
             await db.execute("ALTER TABLE approval_gates ADD COLUMN decided_by_user_id INTEGER")
+        if "expires_at" not in gate_cols:
+            await db.execute("ALTER TABLE approval_gates ADD COLUMN expires_at TEXT")
 
         # v0.3.0 observability migrations
         for obs_col, obs_type in [
@@ -555,12 +557,21 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
 
 
 async def create_approval_gate(task_id: str, action: str) -> ApprovalGate:
-    now = datetime.now(timezone.utc).isoformat()
+    from sandclaude.config import settings as _settings
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    expires_at: str | None = None
+    if _settings.approval_expiry_s > 0:
+        from datetime import timedelta
+
+        expires_at = (now + timedelta(seconds=_settings.approval_expiry_s)).isoformat()
+
     async with aiosqlite.connect(_db_path()) as db:
         cursor = await db.execute(
-            "INSERT INTO approval_gates (task_id, action, status, created_at) "
-            "VALUES (?, ?, 'pending', ?)",
-            (task_id, action, now),
+            "INSERT INTO approval_gates (task_id, action, status, created_at, expires_at) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (task_id, action, now_iso, expires_at),
         )
         await db.commit()
         gate_id = cursor.lastrowid
@@ -569,13 +580,23 @@ async def create_approval_gate(task_id: str, action: str) -> ApprovalGate:
         task_id=task_id,
         action=action,
         status=ApprovalStatus.pending,
-        created_at=now,
+        created_at=now_iso,
+        expires_at=expires_at,
     )
 
 
 async def get_approval_gates(task_id: str) -> list[ApprovalGate]:
+    now_iso = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
+        # Auto-expire pending gates whose expires_at has passed
+        await db.execute(
+            "UPDATE approval_gates SET status = 'rejected', reason = 'expired' "
+            "WHERE task_id = ? AND status = 'pending' AND expires_at IS NOT NULL "
+            "AND expires_at < ?",
+            (task_id, now_iso),
+        )
+        await db.commit()
         cursor = await db.execute(
             "SELECT * FROM approval_gates WHERE task_id = ? ORDER BY created_at", (task_id,)
         )
@@ -590,6 +611,7 @@ async def get_approval_gates(task_id: str) -> list[ApprovalGate]:
             decided_by=r["decided_by"],
             decided_at=r["decided_at"],
             created_at=r["created_at"],
+            expires_at=r["expires_at"],
         )
         for r in rows
     ]
@@ -618,10 +640,12 @@ async def decide_approval_gate(
 
 
 async def has_pending_gates(task_id: str) -> bool:
+    now_iso = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(_db_path()) as db:
         cursor = await db.execute(
-            "SELECT COUNT(*) FROM approval_gates WHERE task_id = ? AND status = 'pending'",
-            (task_id,),
+            "SELECT COUNT(*) FROM approval_gates WHERE task_id = ? AND status = 'pending' "
+            "AND (expires_at IS NULL OR expires_at >= ?)",
+            (task_id, now_iso),
         )
         row = await cursor.fetchone()
         return (row[0] if row else 0) > 0

@@ -276,6 +276,7 @@ class ApprovalGate(BaseModel):
     decided_by: str | None = None  # token fingerprint
     decided_at: str | None = None
     created_at: str = ""
+    expires_at: str | None = None  # v0.4.0: ISO 8601, None = never expires
 
 
 class ApprovalDecisionRequest(BaseModel):

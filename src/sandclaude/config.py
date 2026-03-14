@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     egress_refresh_interval_s: int = 300
     # v0.4.0: Sandbox security profile
     sandbox_mode: SandboxMode = SandboxMode.standard
+    # v0.4.0: Approval gate expiry (seconds, 0 = never expires)
+    approval_expiry_s: int = 86400  # 24 hours
 
     @field_validator("task_timeout_s")
     @classmethod
