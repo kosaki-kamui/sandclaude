@@ -618,7 +618,7 @@ async def export_bundle_endpoint(task_id: str, auth: AuthResult = Depends(_requi
     _require_task_owner(task.owner_token_hash, auth)
 
     bundle: dict = {
-        "version": "0.2.5",
+        "version": "0.3.0",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "task": task.safe_dump(),
     }

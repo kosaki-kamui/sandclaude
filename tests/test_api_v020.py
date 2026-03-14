@@ -289,7 +289,7 @@ class TestBundleEndpoint:
         resp = await client.get(f"/tasks/{task.id}/bundle")
         assert resp.status_code == 200
         bundle = resp.json()
-        assert bundle["version"] == "0.2.5"
+        assert bundle["version"] == "0.3.0"
         assert bundle["task"]["id"] == "task-bundle-api"
         assert "approval_gates" in bundle
         assert "secrets_audit" in bundle

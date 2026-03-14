@@ -128,7 +128,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="sandclaude", version="0.2.5", lifespan=lifespan)
+app = FastAPI(title="sandclaude", version="0.3.0", lifespan=lifespan)
 
 # Register routers (no prefix — all routes stay at their current paths)
 app.include_router(system_router)

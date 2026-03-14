@@ -161,10 +161,19 @@
         {% if has_pending %}
         <div class="card">
             <h2>Decision</h2>
+            {% if logged_in_as %}
+            <p style="color: #58a6ff; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                Logged in as <strong>{{ logged_in_as }}</strong> via GitHub
+            </p>
+            {% else %}
             <p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 0.5rem;">
                 Enter your API token to authorize this action. The approval link only grants view access — approval requires a token with <code>tasks:approve</code> scope.
             </p>
+            {% if github_oauth_available %}
+            <p style="margin-bottom: 0.5rem;"><a href="/auth/github?return_to={{ request_url }}" style="color: #58a6ff;">Sign in with GitHub</a> to approve without a token.</p>
+            {% endif %}
             <input type="password" class="reason-input" id="apiToken" placeholder="API token (required)" autocomplete="off">
+            {% endif %}
             <input type="text" class="reason-input" id="reason" placeholder="Reason (optional)">
             <div class="actions">
                 <button class="btn btn-approve" id="approveBtn" onclick="decide('approve')">Approve</button>
@@ -177,7 +186,7 @@
         </div>
         {% endif %}
 
-        <p class="footer">sandclaude v0.2.0 — all changes require human review before merge</p>
+        <p class="footer">sandclaude v0.3.0 — all changes require human review before merge</p>
     </div>
 
     <script>

@@ -294,7 +294,7 @@ Every task produces a structured audit log:
 - **Single-machine Docker only** - No Kubernetes, no Firecracker, no multi-region. MVP is designed for a single Docker host.
 - **Agent SDK behavior may vary** - The Claude Agent SDK is evolving. Behavior at `maxTurns` limits, error recovery, and context compaction may change between versions.
 - **Network audit is best-effort** - Network requests are inferred from tool calls (curl/wget in Bash, WebFetch), not captured at the network level. Container-level packet logging is planned for future.
-- **Auth: scoped tokens without full identity** - v0.2.0 adds named tokens with scopes, expiry, and revocation. However, there is no OIDC, SSO, or user identity layer. Tokens are attributed by fingerprint in audit logs, not by user name. Fine for startups; not yet enterprise identity.
+- **Auth: identity-bound but no SSO** - v0.3.0 adds users, service accounts, GitHub OAuth for browser login, and identity-bound audit trails (who created what, who approved what). However, there is no OIDC/SAML/SCIM integration for enterprise identity providers. Fine for startups; enterprise SSO is planned for a future release.
 - **PR creation requires `gh` CLI** - The `gh` CLI must be installed and reachable. It is pre-installed in the Docker Compose setup, but bare-metal deployments must install it separately. See [gh CLI installation](https://cli.github.com).
 
 **When to use something else:**

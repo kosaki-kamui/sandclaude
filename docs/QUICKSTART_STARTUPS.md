@@ -33,7 +33,7 @@ docker compose up -d --build
 
 # Verify
 curl http://localhost:3271/health
-# {"status":"ok","version":"0.2.5"}
+# {"status":"ok","version":"0.3.0"}
 
 # Get your admin token
 cat data/.token
