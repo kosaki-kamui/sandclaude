@@ -987,8 +987,13 @@ async def get_task_metrics() -> dict:
 
 
 async def get_retry_chain(task_id: str) -> list[Task]:
-    """Follow parent_task_id links to build the retry chain (oldest first)."""
-    chain: list[Task] = []
+    """Build the full retry chain containing task_id (oldest first).
+
+    Walks parent_task_id upward to find the root, then walks children
+    downward to find all descendants.
+    """
+    # Walk up to the root
+    ancestors: list[Task] = []
     current_id: str | None = task_id
     seen: set[str] = set()
 
@@ -997,8 +1002,32 @@ async def get_retry_chain(task_id: str) -> list[Task]:
         task = await get_task(current_id)
         if not task:
             break
-        chain.append(task)
+        ancestors.append(task)
         current_id = task.parent_task_id
 
-    chain.reverse()  # oldest first
+    ancestors.reverse()  # oldest first
+    root_id = ancestors[0].id if ancestors else task_id
+
+    # Walk down from root to find all descendants
+    chain: list[Task] = [ancestors[0]] if ancestors else []
+    queue = [root_id]
+    visited: set[str] = {root_id}
+
+    while queue:
+        parent_id = queue.pop(0)
+        # Find tasks whose parent_task_id == parent_id
+        async with aiosqlite.connect(_db_path()) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY created_at",
+                (parent_id,),
+            )
+            rows = await cursor.fetchall()
+        for row in rows:
+            child = _row_to_task(row)
+            if child.id not in visited:
+                visited.add(child.id)
+                chain.append(child)
+                queue.append(child.id)
+
     return chain

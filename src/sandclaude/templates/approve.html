@@ -197,11 +197,18 @@
             document.querySelectorAll('.btn').forEach(b => b.disabled = false);
         }
 
+        const isSessionAuth = {{ 'true' if logged_in_as else 'false' }};
+
         async function decide(decision) {
-            const apiToken = document.getElementById('apiToken').value;
-            if (!apiToken) {
-                document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
-                return;
+            const headers = {'Content-Type': 'application/json'};
+            if (!isSessionAuth) {
+                const tokenEl = document.getElementById('apiToken');
+                const apiToken = tokenEl ? tokenEl.value : '';
+                if (!apiToken) {
+                    document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
+                    return;
+                }
+                headers['Authorization'] = 'Bearer ' + apiToken;
             }
             const reason = document.getElementById('reason').value;
             disableAllButtons();
@@ -209,10 +216,8 @@
             try {
                 const resp = await fetch(`/tasks/{{ task_id }}/${decision}/{{ action }}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + apiToken
-                    },
+                    headers: headers,
+                    credentials: isSessionAuth ? 'same-origin' : 'omit',
                     body: JSON.stringify({ reason: reason || null })
                 });
                 const data = await resp.json();
@@ -231,10 +236,15 @@
         }
 
         async function approveAndCreatePR() {
-            const apiToken = document.getElementById('apiToken').value;
-            if (!apiToken) {
-                document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
-                return;
+            const headers = {'Content-Type': 'application/json'};
+            if (!isSessionAuth) {
+                const tokenEl = document.getElementById('apiToken');
+                const apiToken = tokenEl ? tokenEl.value : '';
+                if (!apiToken) {
+                    document.getElementById('result').innerHTML = '<div class="result-msg result-err">API token is required</div>';
+                    return;
+                }
+                headers['Authorization'] = 'Bearer ' + apiToken;
             }
             const reason = document.getElementById('reason').value;
             disableAllButtons();
@@ -242,10 +252,8 @@
             try {
                 const resp = await fetch(`/tasks/{{ task_id }}/approve-and-create-pr`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + apiToken
-                    },
+                    headers: headers,
+                    credentials: isSessionAuth ? 'same-origin' : 'omit',
                     body: JSON.stringify({ reason: reason || null })
                 });
                 const data = await resp.json();

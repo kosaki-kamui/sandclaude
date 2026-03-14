@@ -71,6 +71,24 @@ class TestGitHubLogin:
         assert "github.com/login/oauth/authorize" in location
         assert "client_id=test-id" in location
 
+    async def test_hostile_return_to_blocked(self, oauth_client: AsyncClient):
+        """Absolute URLs in return_to must be blocked (open redirect prevention)."""
+        resp = await oauth_client.get(
+            "/auth/github", params={"return_to": "https://evil.com/steal"}
+        )
+        assert resp.status_code == 307
+        location = resp.headers["location"]
+        # State should contain "/" not the hostile URL
+        # The signed state encodes the sanitized return_to
+        from urllib.parse import parse_qs, urlparse
+
+        from sandclaude.api.oauth import _verify_state
+
+        parsed = urlparse(location)
+        state = parse_qs(parsed.query).get("state", [""])[0]
+        return_to = _verify_state(state)
+        assert return_to == "/"  # sanitized, not the hostile URL
+
     async def test_github_returns_501_when_not_configured(self, client: AsyncClient):
         resp = await client.get("/auth/github", follow_redirects=False)
         assert resp.status_code == 501
@@ -106,32 +124,61 @@ def _mock_github_api(github_username: str = "octocat"):
 
 
 class TestGitHubCallback:
+    def _make_state(self) -> str:
+        """Create a valid signed OAuth state for testing."""
+        from sandclaude.api.oauth import _sign_state
+
+        return _sign_state("/")
+
     async def test_callback_sets_cookie_for_known_user(self, oauth_client: AsyncClient):
         """Valid code + known GitHub user results in session cookie."""
-        # Create a user linked to the GitHub account
         await db.create_user(
             username="octocat",
             display_name="Octo Cat",
             github_username="octocat",
         )
 
+        state = self._make_state()
         mock_client = _mock_github_api("octocat")
         with patch("httpx.AsyncClient", return_value=mock_client):
-            resp = await oauth_client.get("/auth/github/callback", params={"code": "valid-code"})
+            resp = await oauth_client.get(
+                "/auth/github/callback",
+                params={"code": "valid-code", "state": state},
+            )
 
         assert resp.status_code == 302
-        # Session cookie should be set
         cookies = resp.cookies
         assert "sandclaude_session" in cookies
 
     async def test_callback_unknown_github_user_403(self, oauth_client: AsyncClient):
         """Valid code but no sandclaude user linked to that GitHub user."""
+        state = self._make_state()
         mock_client = _mock_github_api("unknown-gh-user")
         with patch("httpx.AsyncClient", return_value=mock_client):
-            resp = await oauth_client.get("/auth/github/callback", params={"code": "valid-code"})
+            resp = await oauth_client.get(
+                "/auth/github/callback",
+                params={"code": "valid-code", "state": state},
+            )
 
         assert resp.status_code == 403
         assert "no sandclaude user" in resp.json()["detail"].lower()
+
+    async def test_callback_rejects_invalid_state(self, oauth_client: AsyncClient):
+        """Invalid or missing state should be rejected."""
+        resp = await oauth_client.get(
+            "/auth/github/callback",
+            params={"code": "valid-code", "state": "tampered-state"},
+        )
+        assert resp.status_code == 400
+        assert "state" in resp.json()["detail"].lower()
+
+    async def test_callback_rejects_missing_state(self, oauth_client: AsyncClient):
+        """Missing state parameter should be rejected."""
+        resp = await oauth_client.get(
+            "/auth/github/callback",
+            params={"code": "valid-code"},
+        )
+        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------

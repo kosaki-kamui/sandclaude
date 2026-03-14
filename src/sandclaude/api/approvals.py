@@ -41,7 +41,7 @@ async def list_approvals_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
     gates = await db.get_approval_gates(task_id)
     return [g.model_dump() for g in gates]
 
@@ -60,7 +60,7 @@ async def approve_action_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     ok = await db.decide_approval_gate(
         task_id,
@@ -131,7 +131,7 @@ async def reject_action_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     ok = await db.decide_approval_gate(
         task_id,
@@ -177,7 +177,7 @@ async def generate_approval_link_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     link_token = create_approval_link_token(task_id, action)
     base_url = settings.api_url.rstrip("/")

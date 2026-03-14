@@ -30,6 +30,7 @@ async def pool_stats() -> dict:
 @router.get("/metrics")
 async def metrics_endpoint(auth: AuthResult = Depends(_require_auth)) -> dict:
     """Aggregated task metrics: status counts, cost, tokens, timing, error categories."""
+    require_scope(auth, "admin:policies")
     return await db.get_task_metrics()
 
 

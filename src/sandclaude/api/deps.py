@@ -121,16 +121,31 @@ def _check_create_rate_limit(auth: AuthResult) -> None:
     bucket.append(now)
 
 
-def _require_task_owner(task_owner_hash: str | None, auth: AuthResult) -> None:
+def _require_task_owner(
+    task_owner_hash: str | None,
+    auth: AuthResult,
+    task_created_by_user_id: int | None = None,
+) -> None:
     """Verify the caller owns this task.
 
     Returns 404 (not 403) on ownership mismatch to prevent cross-tenant
     task ID enumeration — an attacker cannot distinguish "task exists but
     not yours" from "task doesn't exist".
 
+    Matches by token fingerprint OR by user_id (for session auth where
+    fingerprint is empty but user identity is known).
+
     Legacy/migrated tasks with NULL owner_token_hash are NOT open-access —
     they are restricted to the primary server token only.
     """
+    # v0.3.0: Match by user_id when both sides have one (session auth)
+    if (
+        auth.user_id is not None
+        and task_created_by_user_id is not None
+        and auth.user_id == task_created_by_user_id
+    ):
+        return
+
     caller_fp = auth.fingerprint
     if not task_owner_hash:
         # Legacy row: only the primary server token (first candidate) may access.

@@ -35,7 +35,7 @@ async def get_risk_summary_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
         raise HTTPException(
@@ -86,7 +86,7 @@ async def review_task_endpoint(task_id: str, auth: AuthResult = Depends(_require
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     if task.status not in (TaskStatus.completed, TaskStatus.pending_approval):
         raise HTTPException(
@@ -189,5 +189,5 @@ async def get_task_secrets_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
     return await db.get_task_secrets(task_id)

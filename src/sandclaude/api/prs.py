@@ -34,7 +34,7 @@ async def create_pr_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     if task.status != TaskStatus.completed:
         raise HTTPException(
@@ -84,7 +84,7 @@ async def approve_and_create_pr_endpoint(
     task = await db.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    _require_task_owner(task.owner_token_hash, auth)
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
     if task.status != TaskStatus.completed:
         raise HTTPException(

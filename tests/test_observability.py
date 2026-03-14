@@ -338,3 +338,22 @@ class TestVersion030:
         data = resp.json()
         assert data["version"] == "0.3.0"
         assert data["status"] == "ok"
+
+
+class TestMetricsAuth:
+    async def test_metrics_requires_admin_scope(self, client):
+        """GET /metrics must require admin:policies scope."""
+        from sandclaude.auth import generate_token, token_fingerprint
+        from sandclaude.db import store as _db
+
+        raw = generate_token()
+        await _db.create_token(
+            name="limited",
+            token_hash=token_fingerprint(raw),
+            scopes=["tasks:read"],
+        )
+        resp = await client.get(
+            "/metrics",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert resp.status_code == 403
