@@ -20,6 +20,24 @@ from datetime import datetime
 from sandclaude.config import settings
 from sandclaude.models import Task
 
+# Patterns that look like secrets — redacted from PR body and commit messages
+_SECRET_PATTERNS = re.compile(
+    r"(?:"
+    r"(?:sk-ant-|ghp_|gho_|github_pat_|npm_|pypi-)"  # known prefixes
+    r"[A-Za-z0-9_\-]{10,}"
+    r"|"
+    r"(?:password|passwd|secret|token|api[_-]?key|auth)"  # key=value pairs
+    r"\s*[=:]\s*\S{8,}"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Scrub likely secrets from text before including in PR body or commit message."""
+    return _SECRET_PATTERNS.sub("[REDACTED]", text)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -250,6 +268,12 @@ class _GitCredentialHelper:
 
     Uses mkstemp() (not mktemp()) to avoid TOCTOU race conditions, sets strict
     permissions (0o700), and guarantees cleanup via __exit__.
+
+    The script handles the Git credential protocol properly: Git calls
+    GIT_ASKPASS with a prompt string as $1. For HTTPS authentication:
+    - "Username*" prompt → responds with "x-access-token" (GitHub PAT convention)
+    - "Password*" prompt → responds with the actual token
+    This is more robust than echoing the token for all prompts.
     """
 
     def __init__(self) -> None:
@@ -262,9 +286,16 @@ class _GitCredentialHelper:
         fd, self._path = tempfile.mkstemp(prefix="sandclaude-askpass-", suffix=".sh")
         try:
             os.fchmod(fd, 0o700)
-            # Use shlex.quote to prevent shell injection from token values
-            # containing metacharacters ($, `, ", newlines, etc.)
-            os.write(fd, f"#!/bin/sh\necho {shlex.quote(token)}\n".encode())
+            # Shell injection prevention via shlex.quote
+            quoted_token = shlex.quote(token)
+            script = (
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                '  Username*|username*) echo "x-access-token" ;;\n'
+                f"  *) echo {quoted_token} ;;\n"
+                "esac\n"
+            )
+            os.write(fd, script.encode())
         finally:
             os.close(fd)
         return {
@@ -428,8 +459,8 @@ def _build_commit_message(task: Task, audit: dict, diff: str, pr_title: str) -> 
 
     lines = [pr_title, ""]
 
-    # Always include the prompt — this is the user's own commit, not a webhook
-    prompt_excerpt = task.prompt[:500]
+    # Always include the prompt — redact any embedded secrets
+    prompt_excerpt = _redact_secrets(task.prompt[:500])
     if len(task.prompt) > 500:
         prompt_excerpt += "..."
     lines.append(f"Prompt: {prompt_excerpt}")
@@ -450,7 +481,7 @@ def _build_commit_message(task: Task, audit: dict, diff: str, pr_title: str) -> 
         lines.append(f"Commands executed: {len(commands)}")
         for cmd in commands[:10]:
             # Truncate long commands
-            display = cmd[:120] + ("..." if len(cmd) > 120 else "")
+            display = _redact_secrets(cmd[:120]) + ("..." if len(cmd) > 120 else "")
             lines.append(f"  $ {display}")
         if len(commands) > 10:
             lines.append(f"  ... and {len(commands) - 10} more")
@@ -484,12 +515,12 @@ def _build_pr_body(
     parts = [
         "## Summary",
         "",
-        f"> {task.prompt[:500]}{'...' if len(task.prompt) > 500 else ''}",
+        f"> {_redact_secrets(task.prompt[:500])}{'...' if len(task.prompt) > 500 else ''}",
         "",
     ]
 
     if ai_summary:
-        parts.extend([ai_summary, ""])
+        parts.extend([_redact_secrets(ai_summary), ""])
 
     parts.extend(
         [
@@ -530,7 +561,7 @@ def _build_pr_body(
         parts.append("")
         parts.append("```bash")
         for cmd in commands:
-            parts.append(cmd)
+            parts.append(_redact_secrets(cmd))
         parts.append("```")
         parts.append("</details>")
     else:
