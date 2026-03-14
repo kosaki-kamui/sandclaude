@@ -49,10 +49,16 @@ async def _ensure_admin_user():
         linked = await db.link_orphan_tokens_to_user(admin.id)
         if linked:
             logger.info("Linked %d orphan token(s) to admin user", linked)
-        # Backfill tasks missing created_by_user_id
+        # Backfill pre-v0.3.0 tasks that have no user identity.
+        # These are assigned to admin because pre-v0.3.0 had no user model —
+        # all activity was via the primary token (= admin). This is a one-time
+        # migration; newly created tasks record the actual user.
         backfilled = await db.backfill_task_user_ids(admin.id)
         if backfilled:
-            logger.info("Backfilled %d task(s) with admin user_id", backfilled)
+            logger.info(
+                "v0.3.0 migration: assigned %d pre-upgrade task(s) to admin user",
+                backfilled,
+            )
         return admin
 
     # Create admin user (self-referential created_by set after)
@@ -70,7 +76,10 @@ async def _ensure_admin_user():
         logger.info("Linked %d existing token(s) to admin user", linked)
     backfilled = await db.backfill_task_user_ids(admin.id)
     if backfilled:
-        logger.info("Backfilled %d task(s) with admin user_id", backfilled)
+        logger.info(
+            "v0.3.0 migration: assigned %d pre-upgrade task(s) to admin user",
+            backfilled,
+        )
 
     return admin
 

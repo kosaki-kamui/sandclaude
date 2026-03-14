@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **API refactored into domain routers** — `main.py` split from 1600 lines into 9 focused modules (tasks, approvals, prs, tokens, policies, review, system, users, oauth) with shared `deps.py`
 - **`_require_auth` returns `AuthResult`** — eliminates double token verification across all routes, makes user identity available everywhere
 - **Version bumped to 0.3.0** — pyproject.toml, health endpoint, API title
+- **Upgrade migration** — pre-v0.3.0 tokens and tasks are assigned to the bootstrap admin user at startup. This is correct because pre-v0.3.0 had no user model — all activity was via the primary token. The migration runs once and is idempotent
 
 ## [0.2.5] - 2026-03-12
 
