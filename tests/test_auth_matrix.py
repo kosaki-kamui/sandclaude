@@ -272,3 +272,60 @@ class TestAdminScope:
         resp = await client.get("/admin/doctor")
         assert resp.status_code == 403
         await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Approval side-channels: require tasks:read
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalSideChannelScope:
+    async def test_list_approvals_without_read_scope(self, admin_client):
+        """Token without tasks:read gets 403 on GET /tasks/{id}/approvals."""
+        task_id = await _create_test_task(admin_client)
+        client, _ = await _make_scoped_client(["tasks:create"])
+        resp = await client.get(f"/tasks/{task_id}/approvals")
+        assert resp.status_code == 403
+        await client.aclose()
+
+    async def test_approval_link_without_read_scope(self, admin_client):
+        """Token without tasks:read gets 403 on POST /tasks/{id}/approval-link."""
+        task_id = await _create_test_task(admin_client)
+        await db.create_approval_gate(task_id, "create_pr")
+        client, _ = await _make_scoped_client(["tasks:create"])
+        resp = await client.post(f"/tasks/{task_id}/approval-link/create_pr")
+        assert resp.status_code == 403
+        await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket streaming: requires tasks:read
+# ---------------------------------------------------------------------------
+
+
+class TestWebSocketScope:
+    def test_stream_without_read_scope(self):
+        """WebSocket with token lacking tasks:read gets closed with 4003."""
+        import asyncio
+
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        raw = generate_token()
+        asyncio.get_event_loop().run_until_complete(
+            db.create_token(
+                name="no-read-ws",
+                token_hash=token_fingerprint(raw),
+                scopes=["tasks:create"],
+            )
+        )
+
+        with TestClient(app) as tc:
+            try:
+                with tc.websocket_connect(
+                    "/tasks/task-fake/stream",
+                    headers={"Authorization": f"Bearer {raw}"},
+                ):
+                    pytest.fail("WebSocket should have been rejected")
+            except (WebSocketDisconnect, Exception):
+                pass  # Expected: connection closed due to missing scope

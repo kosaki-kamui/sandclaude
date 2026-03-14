@@ -37,6 +37,7 @@ router = APIRouter()
 async def list_approvals_endpoint(
     task_id: str, auth: AuthResult = Depends(_require_auth)
 ) -> list[dict]:
+    require_scope(auth, "tasks:read")
     _validate_task_id(task_id)
     task = await db.get_task(task_id)
     if not task:
@@ -171,6 +172,7 @@ async def generate_approval_link_endpoint(
     It grants read-only access to the approval page — the user must
     enter their own API token to actually approve or reject.
     """
+    require_scope(auth, "tasks:read")
     from sandclaude.auth import create_approval_link_token
 
     _validate_task_id(task_id)

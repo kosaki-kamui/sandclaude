@@ -728,6 +728,11 @@ async def stream_task(ws: WebSocket, task_id: str) -> None:
         await ws.close(code=4003, reason="Invalid token")
         return
 
+    # Scope check: streaming requires tasks:read
+    if not ws_auth.has_scope("tasks:read"):
+        await ws.close(code=4003, reason="Scope tasks:read required")
+        return
+
     await ws.accept()
 
     task = await db.get_task(task_id)
