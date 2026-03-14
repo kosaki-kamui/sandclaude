@@ -285,22 +285,33 @@ Every task produces a structured audit log:
 - **Sophisticated network bypass** - iptables rules block common exfiltration vectors (TCP, UDP, ICMP, DNS tunneling) but a determined attacker with kernel access could potentially bypass them.
 - **Malicious-looking-benign code** - The agent could write code that passes review but contains subtle backdoors. The audit trail helps but doesn't eliminate this risk.
 
+## Deployment Model
+
+sandclaude is designed as a **single-instance, self-hosted internal platform**. This is intentional:
+
+- **Single process** — pool scheduling, rate limiting, and background task state are process-local. The server blocks startup if `WEB_CONCURRENCY > 1` or `--workers > 1`
+- **Single machine** — SQLite database, local filesystem for task artifacts, Docker socket for container management
+- **Not horizontally scalable** — adding replicas or load balancers requires redesigning state coordination. This is not planned for the current release
+- **Self-hosted only** — not a multi-tenant SaaS. Each deployment serves one team with shared infrastructure
+
+This model works well for startups, small teams, and internal automation. If you need multi-region, multi-tenant, or horizontally scaled agent infrastructure, this is not the right tool yet.
+
 ## Limitations & When NOT to Use This
 
 **Be honest about what this is:**
 
-- **Not more secure than Codex** - OpenAI has a dedicated security team managing Codex infrastructure. sandclaude is a solo/small-team operated project with Docker-level isolation.
-- **Not more reliable than Claude Code Web** - Anthropic's infrastructure is professionally managed. Self-hosted means self-operated.
-- **Single-machine Docker only** - No Kubernetes, no Firecracker, no multi-region. MVP is designed for a single Docker host.
-- **Agent SDK behavior may vary** - The Claude Agent SDK is evolving. Behavior at `maxTurns` limits, error recovery, and context compaction may change between versions.
-- **Network audit is best-effort** - Network requests are inferred from tool calls (curl/wget in Bash, WebFetch), not captured at the network level. Container-level packet logging is planned for future.
-- **Auth: identity-bound but no SSO** - v0.3.0 adds users, service accounts, GitHub OAuth for browser login, and identity-bound audit trails (who created what, who approved what). However, there is no OIDC/SAML/SCIM integration for enterprise identity providers. Fine for startups; enterprise SSO is planned for a future release.
-- **PR creation requires `gh` CLI** - The `gh` CLI must be installed and reachable. It is pre-installed in the Docker Compose setup, but bare-metal deployments must install it separately. See [gh CLI installation](https://cli.github.com).
+- **Not more secure than Codex** — OpenAI has a dedicated security team managing Codex infrastructure. sandclaude is a solo/small-team operated project with Docker-level isolation
+- **Not more reliable than Claude Code Web** — Anthropic's infrastructure is professionally managed. Self-hosted means self-operated
+- **Single-machine Docker only** — no Kubernetes, no Firecracker, no multi-region (see Deployment Model above)
+- **Agent SDK behavior may vary** — the Claude Agent SDK is evolving. Behavior at `maxTurns` limits, error recovery, and context compaction may change between versions
+- **Network audit is best-effort** — network requests are inferred from tool calls (curl/wget in Bash, WebFetch), not captured at the network level. Container-level packet logging is planned for future
+- **Auth: identity-bound but no SSO** — v0.3.0 adds users, service accounts, GitHub OAuth for browser login, and identity-bound audit trails. However, there is no OIDC/SAML/SCIM integration for enterprise identity providers
+- **PR creation requires `gh` CLI** — pre-installed in Docker Compose setup; bare-metal deployments must install it separately. See [gh CLI installation](https://cli.github.com)
 
 **When to use something else:**
-- If you're happy with GPT and don't need Claude - use Codex
-- If you don't need data residency controls - use Claude Code Web
-- If you need enterprise-grade security guarantees - wait for Anthropic's managed offering
+- If you're happy with GPT and don't need Claude — use Codex
+- If you don't need data residency controls — use Claude Code Web
+- If you need enterprise-grade security guarantees — wait for Anthropic's managed offering
 
 ## Configuration
 
