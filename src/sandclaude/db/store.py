@@ -157,6 +157,9 @@ async def init_db() -> None:
             ("parent_task_id", "TEXT"),
             ("labels", "TEXT"),
             ("cancel_reason", "TEXT"),
+            # v0.4.0 columns
+            ("completion_reason", "TEXT"),
+            ("review_required", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             if obs_col not in task_cols_v3:
                 await db.execute(f"ALTER TABLE tasks ADD COLUMN {obs_col} {obs_type}")
@@ -320,6 +323,8 @@ async def update_task(
     agent_started_at: str | None = None,
     error_category: str | None = None,
     cancel_reason: str | None = None,
+    completion_reason: str | None = None,
+    review_required: int | None = None,
 ) -> None:
     sets: list[str] = []
     vals: list[object] = []
@@ -366,6 +371,12 @@ async def update_task(
     if cancel_reason is not None:
         sets.append("cancel_reason = ?")
         vals.append(cancel_reason)
+    if completion_reason is not None:
+        sets.append("completion_reason = ?")
+        vals.append(completion_reason)
+    if review_required is not None:
+        sets.append("review_required = ?")
+        vals.append(review_required)
 
     if not sets:
         return
@@ -533,6 +544,8 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         parent_task_id=row["parent_task_id"] if "parent_task_id" in keys else None,
         labels=row["labels"] if "labels" in keys else None,
         cancel_reason=row["cancel_reason"] if "cancel_reason" in keys else None,
+        completion_reason=row["completion_reason"] if "completion_reason" in keys else None,
+        review_required=row["review_required"] if "review_required" in keys else 0,
     )
 
 

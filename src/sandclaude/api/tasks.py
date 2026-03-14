@@ -593,6 +593,24 @@ async def retry_task_endpoint(
     return result
 
 
+@router.post("/tasks/{task_id}/clear-review")
+async def clear_review_endpoint(task_id: str, auth: AuthResult = Depends(_require_auth)) -> dict:
+    """Clear the review_required flag on a partial task, allowing PR creation."""
+    require_scope(auth, "tasks:approve")
+    _validate_task_id(task_id)
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
+    if task.status != TaskStatus.partial:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only partial tasks can have review cleared (current: {task.status.value})",
+        )
+    await db.update_task(task_id, review_required=0)
+    return {"cleared": task_id, "review_required": 0}
+
+
 # ── v0.3.0: Task timeline ──────────────────────────────────────
 
 

@@ -51,6 +51,7 @@ class ExecutorResult:
         duration_api_ms: int = 0,
         stop_reason: str | None = None,
         error: str | None = None,
+        completion_reason: str = "error",
     ):
         self.success = success
         self.diff = diff
@@ -64,6 +65,7 @@ class ExecutorResult:
         self.duration_api_ms = duration_api_ms
         self.stop_reason = stop_reason
         self.error = error
+        self.completion_reason = completion_reason
 
 
 async def execute_task(
@@ -206,11 +208,17 @@ async def _execute_via_sdk(
     usage = getattr(result_message, "usage", None)
     tokens_in = getattr(usage, "input_tokens", 0) if usage else 0
     tokens_out = getattr(usage, "output_tokens", 0) if usage else 0
-    # Determine success: explicit "success" subtype, OR the agent hit max_turns
-    # but still produced a non-empty diff (work completed, just ran out of turns
-    # before the SDK could emit a clean "success" result).
+    # Determine success and completion reason from SDK result subtype.
     subtype = getattr(result_message, "subtype", "")
-    is_success = subtype == "success" or (subtype == "error_max_turns" and bool(diff.strip()))
+    if subtype == "success":
+        is_success = True
+        completion_reason = "success"
+    elif subtype == "error_max_turns":
+        is_success = False
+        completion_reason = "max_turns"
+    else:
+        is_success = False
+        completion_reason = subtype or "error"
 
     # If audit data is empty but we have a diff, extract file info from it
     if not files_written and diff.strip():
@@ -241,6 +249,7 @@ async def _execute_via_sdk(
         duration_api_ms=getattr(result_message, "duration_api_ms", 0),
         stop_reason=getattr(result_message, "stop_reason", None),
         error=None if is_success else _get_errors(result_message),
+        completion_reason=completion_reason,
     )
 
 

@@ -51,8 +51,10 @@ class TaskStatus(str, Enum):
     running = "running"
     pending_approval = "pending_approval"
     completed = "completed"
+    partial = "partial"  # v0.4.0: agent hit max_turns but produced output
     failed = "failed"
     cancelled = "cancelled"
+    timed_out = "timed_out"  # v0.4.0: container-level timeout
 
 
 class TaskPriority(str, Enum):
@@ -174,6 +176,9 @@ class Task(BaseModel):
     parent_task_id: str | None = None
     labels: str | None = None  # JSON-encoded list of tags
     cancel_reason: str | None = None
+    # v0.4.0: Execution result model
+    completion_reason: str | None = None  # "success", "max_turns", "cost_exceeded", etc.
+    review_required: int = 0  # 1 if task needs human review before PR
 
     def safe_dump(self) -> dict:
         """Serialize for API responses, excluding internal fields (S11)."""

@@ -177,6 +177,7 @@ async def main() -> None:
                     "duration_ms": result.duration_ms,
                     "duration_api_ms": result.duration_api_ms,
                     "stop_reason": result.stop_reason,
+                    "completion_reason": result.completion_reason,
                     "error": result.error,
                 },
                 indent=2,

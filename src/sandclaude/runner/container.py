@@ -456,7 +456,19 @@ async def run_task_in_container(task: Task) -> dict:
         result_path = output_dir / "result.json"
         if result_path.exists():
             result_data = json.loads(result_path.read_text())
-            status = TaskStatus.completed if result_data.get("success") else TaskStatus.failed
+            completion_reason = result_data.get("completion_reason")
+            if result_data.get("success"):
+                status = TaskStatus.completed
+            elif completion_reason == "max_turns":
+                # Check if diff exists (agent produced output despite hitting turn limit)
+                diff_path = output_dir / "diff.patch"
+                has_diff = diff_path.exists() and diff_path.stat().st_size > 0
+                if has_diff:
+                    status = TaskStatus.partial
+                else:
+                    status = TaskStatus.failed
+            else:
+                status = TaskStatus.failed
             # Clamp/validate numeric fields from untrusted container output
             tokens_in = result_data.get("tokens_input")
             tokens_out = result_data.get("tokens_output")
@@ -503,6 +515,9 @@ async def run_task_in_container(task: Task) -> dict:
                 and cost > task.cost_budget_usd
             ):
                 result_error_category = "cost_exceeded"
+                completion_reason = "cost_exceeded"
+
+            review_required = 1 if status == TaskStatus.partial else 0
 
             await db.update_task(
                 task.id,
@@ -513,6 +528,8 @@ async def run_task_in_container(task: Task) -> dict:
                 total_cost_usd=cost,
                 error=error_str,
                 error_category=result_error_category,
+                completion_reason=completion_reason,
+                review_required=review_required,
             )
 
             # v0.3.0: Post-execution rule evaluation — auto-approve gates
@@ -567,14 +584,20 @@ async def run_task_in_container(task: Task) -> dict:
             return result_data
         else:
             error = f"Container exited with code {exit_code} without producing results"
+            if exit_code == 137:  # SIGKILL — likely timeout
+                timeout_status = TaskStatus.timed_out
+                error_cat = "timeout"
+            else:
+                timeout_status = TaskStatus.failed
+                error_cat = "container_error"
             # Use conditional update to avoid overwriting cancelled status
             await db.update_task_if_status(
                 task.id,
                 expected_statuses=[TaskStatus.setup, TaskStatus.running],
-                status=TaskStatus.failed,
+                status=timeout_status,
                 completed_at=datetime.now(timezone.utc).isoformat(),
                 error=error,
-                error_category="container_error",
+                error_category=error_cat,
             )
             return {"success": False, "error": error}
 

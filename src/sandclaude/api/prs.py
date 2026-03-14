@@ -37,7 +37,22 @@ async def create_pr_endpoint(
         raise HTTPException(status_code=404, detail="Task not found")
     _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
-    if task.status != TaskStatus.completed:
+    if task.status == TaskStatus.completed:
+        pass  # always allowed
+    elif task.status == TaskStatus.partial:
+        # Partial tasks need review clearance or approved create_pr gate
+        if task.review_required:
+            gates = await db.get_approval_gates(task_id)
+            pr_gate = next((g for g in gates if g.action == "create_pr"), None)
+            if not pr_gate or pr_gate.status.value != "approved":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Partial task requires review clearance or approved "
+                        "create_pr gate. Use POST /tasks/{id}/clear-review."
+                    ),
+                )
+    else:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot create PR for task in status: {task.status.value}",
@@ -87,7 +102,22 @@ async def approve_and_create_pr_endpoint(
         raise HTTPException(status_code=404, detail="Task not found")
     _require_task_owner(task.owner_token_hash, auth, task.created_by_user_id)
 
-    if task.status != TaskStatus.completed:
+    if task.status == TaskStatus.completed:
+        pass  # always allowed
+    elif task.status == TaskStatus.partial:
+        # Partial tasks need review clearance or approved create_pr gate
+        if task.review_required:
+            gates = await db.get_approval_gates(task_id)
+            pr_gate = next((g for g in gates if g.action == "create_pr"), None)
+            if not pr_gate or pr_gate.status.value != "approved":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Partial task requires review clearance or approved "
+                        "create_pr gate. Use POST /tasks/{id}/clear-review."
+                    ),
+                )
+    else:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot create PR for task in status: {task.status.value}",
