@@ -505,7 +505,7 @@ When a budget-gated task is created, you can also manage it through the browser-
    - A **Budget Estimate** card with predicted cost, budget cap, confidence level, estimation mode, and the current gate decision
    - The current gate status — this updates live, so if someone has already approved or rejected the gate, the page reflects that
 
-3. **Approve or reject** using your API token (the approval link grants view access only; the approve/reject action requires your own token entered in the UI).
+3. **Approve or reject.** If GitHub OAuth is configured (`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`), you can log in via GitHub and approve with one click — no token paste needed. Without OAuth, the approval link is view-only and you must enter an API token with `tasks:approve` scope to approve or reject.
 
 The budget card on the approval page always shows the **live gate status** (pending, approved, or rejected), not the stale admission-time decision.
 
