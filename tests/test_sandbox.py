@@ -102,6 +102,8 @@ class TestContainerSandboxKwargs:
         assert "/tmp" in tmpfs
         assert "/home/agent" in tmpfs
         assert "/root" in tmpfs
+        assert "/usr/local" in tmpfs  # pip/npm installs
+        assert "/var/cache" in tmpfs  # package caches
 
     async def test_sandbox_mode_in_container_env(self):
         """Container environment should include SANDBOX_MODE."""

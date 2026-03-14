@@ -1,7 +1,7 @@
 """
 SECURITY-CRITICAL: Docker container lifecycle + network isolation.
 
-The network switch (setup-net - agent-net + iptables) is the primary
+The network switch (setup-net → agent-net + iptables) is the primary
 isolation boundary preventing code exfiltration by a compromised agent.
 Changes to this file require careful security review.
 
@@ -9,11 +9,16 @@ Container lifecycle:
 1. Create container on setup-net (full internet for deps)
 2. Start container (setup phase: clone, install deps)
 3. Wait for .setup-complete marker
-4. Network switch: disconnect setup-net, connect agent-net
-5. Apply iptables rules inside container (only api.anthropic.com:443)
+4. Apply iptables rules inside container (S3: BEFORE network switch)
+5. Network switch: disconnect setup-net, connect agent-net
 6. Signal container to proceed (.network-switched marker)
 7. Wait for completion, collect results
 8. Cleanup container
+
+v0.4.0: Sandbox modes (standard/strict) control additional hardening.
+NET_ADMIN capability is dropped from bounding set by the entrypoint
+after iptables rules are applied. Strict mode adds read-only rootfs
+and no-new-privileges.
 """
 
 from __future__ import annotations
@@ -376,7 +381,9 @@ async def run_task_in_container(task: Task) -> dict:
             "cap_add": ["NET_ADMIN"],  # Required for in-container iptables
         }
         if sandbox == SandboxMode.strict:
-            # Read-only root filesystem — writable paths via tmpfs
+            # Read-only root filesystem — writable paths via tmpfs.
+            # /workspace and /output are bind-mounted volumes (already writable).
+            # Package managers need writable paths for caches and installs.
             container_kwargs["read_only"] = True
             container_kwargs["tmpfs"] = {
                 "/tmp": "size=256m",
@@ -384,6 +391,9 @@ async def run_task_in_container(task: Task) -> dict:
                 "/root": "size=64m",
                 "/var/tmp": "size=64m",
                 "/run": "size=64m",
+                "/usr/local": "size=512m",  # pip, npm global installs
+                "/var/lib/apt": "size=128m",  # apt package cache
+                "/var/cache": "size=128m",  # general package caches
             }
             container_kwargs["security_opt"] = ["no-new-privileges:true"]
 

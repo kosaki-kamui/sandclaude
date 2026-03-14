@@ -330,9 +330,9 @@ class TestMetricsCountsErrorCategories:
 # ---------------------------------------------------------------------------
 
 
-class TestVersion030:
-    async def test_version_030(self, client: AsyncClient):
-        """GET /health returns version '0.3.0'."""
+class TestVersion:
+    async def test_version(self, client: AsyncClient):
+        """GET /health returns current version."""
         resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()

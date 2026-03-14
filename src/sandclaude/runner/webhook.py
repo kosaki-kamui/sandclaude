@@ -312,6 +312,17 @@ async def send_approval_webhook(task: Task, action: str, event: str) -> None:
     if event not in events and "approval" not in events:
         return
 
+    # HTTPS enforcement (same policy as send_webhook)
+    env_name = settings.environment.strip().lower()
+    if env_name not in {"test", "dev", "development"}:
+        if not task.notify_webhook.startswith("https://"):
+            logger.warning(
+                "BLOCKED: %s is not HTTPS (approval webhook for task %s)",
+                _redact_url(task.notify_webhook),
+                task.id,
+            )
+            return
+
     is_slack = "hooks.slack.com" in task.notify_webhook
     payload: dict[str, Any] = {}
     if is_slack:
