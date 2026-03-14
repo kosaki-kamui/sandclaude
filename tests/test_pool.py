@@ -14,7 +14,14 @@ from sandclaude.db.store import (
     update_task,
 )
 from sandclaude.models import TaskPriority, TaskStatus
-from sandclaude.runner.pool import reset_runner_fn, set_runner_fn, submit_task
+from sandclaude.runner.pool import (
+    LocalScheduler,
+    Scheduler,
+    get_scheduler,
+    reset_runner_fn,
+    set_runner_fn,
+    submit_task,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -187,3 +194,27 @@ async def test_cancelled_task_not_executed():
     t2_final = await get_task("task-2")
     assert t2_final is not None
     assert t2_final.status == TaskStatus.cancelled
+
+
+# ── v0.4.0: Scheduler protocol tests ──────────────────────────────
+
+
+def test_local_scheduler_implements_protocol():
+    """LocalScheduler must satisfy the Scheduler protocol."""
+    assert isinstance(LocalScheduler(), Scheduler)
+
+
+def test_get_scheduler_returns_scheduler():
+    """get_scheduler() should return a Scheduler-compatible instance."""
+    scheduler = get_scheduler()
+    assert isinstance(scheduler, Scheduler)
+
+
+async def test_scheduler_stats():
+    """Scheduler.stats() should return pool metrics."""
+    scheduler = get_scheduler()
+    stats = await scheduler.stats()
+    assert "max_concurrent" in stats
+    assert "active" in stats
+    assert "queued" in stats
+    assert stats["max_concurrent"] >= 1
