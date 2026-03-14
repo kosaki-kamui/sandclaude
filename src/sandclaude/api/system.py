@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends
 
 from sandclaude.api.deps import _require_auth
 from sandclaude.auth import AuthResult, require_scope
-from sandclaude.config import settings
+from sandclaude.config import SandboxMode, settings
 from sandclaude.db import store as db
 from sandclaude.runner.pool import get_pool_stats
 
@@ -66,6 +66,9 @@ async def doctor_endpoint(auth: AuthResult = Depends(_require_auth)) -> dict:
 
     # 8. Network isolation config
     checks.append(_check_network_isolation())
+
+    # 9. Sandbox mode
+    checks.append(_check_sandbox_mode())
 
     passed = sum(1 for c in checks if c["status"] == "pass")
     warned = sum(1 for c in checks if c["status"] == "warn")
@@ -225,4 +228,34 @@ def _check_network_isolation() -> dict:
         "name": "network_isolation",
         "status": "pass",
         "message": "Network isolation enabled",
+    }
+
+
+def _check_sandbox_mode() -> dict:
+    """Check sandbox mode configuration."""
+    mode = settings.sandbox_mode
+    env = settings.environment.strip().lower()
+    if mode == SandboxMode.strict:
+        return {
+            "name": "sandbox_mode",
+            "status": "pass",
+            "message": (
+                "Sandbox mode: strict (read-only rootfs, no-new-privileges, "
+                "NET_ADMIN dropped after iptables)"
+            ),
+        }
+    # standard mode
+    if env == "production":
+        return {
+            "name": "sandbox_mode",
+            "status": "warn",
+            "message": (
+                "Sandbox mode: standard. Consider SANDBOX_MODE=strict for production "
+                "(adds read-only rootfs and no-new-privileges)"
+            ),
+        }
+    return {
+        "name": "sandbox_mode",
+        "status": "pass",
+        "message": "Sandbox mode: standard (NET_ADMIN dropped after iptables)",
     }

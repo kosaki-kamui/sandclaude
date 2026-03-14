@@ -3,10 +3,22 @@ Type-safe configuration via pydantic-settings.
 All settings are configurable via environment variables or .env file.
 """
 
+from enum import Enum
 from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+
+class SandboxMode(str, Enum):
+    """Container sandbox security profile.
+
+    standard: NET_ADMIN for iptables, dropped after rules applied. Default.
+    strict:   NET_ADMIN dropped + read-only root filesystem + no-new-privileges.
+    """
+
+    standard = "standard"
+    strict = "strict"
 
 
 class Settings(BaseSettings):
@@ -31,6 +43,8 @@ class Settings(BaseSettings):
     github_client_secret: str = ""
     # v0.3.0: Egress allowlist refresh interval (seconds, 0 = disabled)
     egress_refresh_interval_s: int = 300
+    # v0.4.0: Sandbox security profile
+    sandbox_mode: SandboxMode = SandboxMode.standard
 
     @field_validator("task_timeout_s")
     @classmethod

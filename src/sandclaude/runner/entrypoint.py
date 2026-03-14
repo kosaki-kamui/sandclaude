@@ -226,10 +226,44 @@ def _build_env_context(allowed_domains: list[str]) -> str:
     )
 
 
+def _drop_net_admin() -> None:
+    """Irrevocably drop NET_ADMIN from the capability bounding set.
+
+    Called after iptables rules are applied (network switch complete) and before
+    the agent phase starts. Uses prctl(PR_CAPBSET_DROP) which affects PID 1 and
+    all future children — no process in this container can regain NET_ADMIN.
+
+    iptables rules already in effect are not affected; they persist in the
+    kernel's netfilter tables regardless of the process's capabilities.
+    """
+    import ctypes
+    import ctypes.util
+
+    PR_CAPBSET_DROP = 24
+    CAP_NET_ADMIN = 12
+
+    libc_name = ctypes.util.find_library("c")
+    if not libc_name:
+        print("[runner] WARNING: could not find libc — NET_ADMIN not dropped")
+        return
+
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    ret = libc.prctl(PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0)
+    if ret != 0:
+        errno = ctypes.get_errno()
+        print(f"[runner] WARNING: prctl(PR_CAPBSET_DROP, CAP_NET_ADMIN) failed: errno={errno}")
+    else:
+        print("[runner] NET_ADMIN capability dropped from bounding set")
+
+
 def _drop_privileges_for_agent(uid: int = 1000, gid: int = 1000) -> None:
     """Run agent phase as non-root so Claude bypass-permissions mode is allowed."""
     if os.geteuid() != 0:
         return
+
+    # Drop NET_ADMIN before switching to non-root. Must happen while still
+    # root because PR_CAPBSET_DROP requires CAP_SETPCAP (which root has).
+    _drop_net_admin()
 
     try:
         subprocess.run(

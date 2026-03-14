@@ -30,7 +30,7 @@ from pathlib import Path
 
 import docker
 
-from sandclaude.config import settings
+from sandclaude.config import SandboxMode, settings
 from sandclaude.db import store as db
 from sandclaude.models import Task, TaskStatus
 
@@ -317,6 +317,7 @@ async def run_task_in_container(task: Task) -> dict:
         "TASK_TIMEOUT_S": str(settings.task_timeout_s),
         "ANTHROPIC_API_KEY": settings.anthropic_api_key,
         "ALLOWED_DOMAINS": ",".join(all_allowed),
+        "SANDBOX_MODE": settings.sandbox_mode.value,
     }
 
     # Pass git token for private repo cloning (setup phase only — scrubbed before agent phase)
@@ -363,17 +364,30 @@ async def run_task_in_container(task: Task) -> dict:
         )
 
         # Create container on setup-net
-        container = await asyncio.to_thread(
-            client.containers.run,
-            image=RUNNER_IMAGE,
-            environment=env,
-            volumes=volumes,
-            network=SETUP_NETWORK,
-            detach=True,
-            mem_limit="2g",
-            cpu_shares=512,
-            cap_add=["NET_ADMIN"],  # Required for in-container iptables
-        )
+        sandbox = settings.sandbox_mode
+        container_kwargs: dict = {
+            "image": RUNNER_IMAGE,
+            "environment": env,
+            "volumes": volumes,
+            "network": SETUP_NETWORK,
+            "detach": True,
+            "mem_limit": "2g",
+            "cpu_shares": 512,
+            "cap_add": ["NET_ADMIN"],  # Required for in-container iptables
+        }
+        if sandbox == SandboxMode.strict:
+            # Read-only root filesystem — writable paths via tmpfs
+            container_kwargs["read_only"] = True
+            container_kwargs["tmpfs"] = {
+                "/tmp": "size=256m",
+                "/home/agent": "size=256m",
+                "/root": "size=64m",
+                "/var/tmp": "size=64m",
+                "/run": "size=64m",
+            }
+            container_kwargs["security_opt"] = ["no-new-privileges:true"]
+
+        container = await asyncio.to_thread(client.containers.run, **container_kwargs)
         container_id = container.id
         await db.update_task(task.id, container_id=container_id)
 
