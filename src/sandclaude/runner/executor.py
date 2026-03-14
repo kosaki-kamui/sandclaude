@@ -458,7 +458,13 @@ def _extract_audit(
         domain = _extract_domain(url)
         if domain:
             allowed = domain in allowed_domains
-            network_requests.append({"destination": domain, "allowed": allowed})
+            network_requests.append(
+                {
+                    "destination": domain,
+                    "allowed": allowed,
+                    "source": "observed",
+                }
+            )
 
 
 def _extract_network_from_command(
@@ -471,7 +477,13 @@ def _extract_network_from_command(
         domain = _extract_domain(match.group(1))
         if domain:
             allowed = domain in allowed_domains
-            network_requests.append({"destination": domain, "allowed": allowed})
+            network_requests.append(
+                {
+                    "destination": domain,
+                    "allowed": allowed,
+                    "source": "inferred",
+                }
+            )
 
 
 def _extract_files_from_diff(diff: str) -> set[str]:
@@ -489,6 +501,29 @@ def _extract_domain(url: str) -> str | None:
         return None
 
 
+def _build_operator_summary(
+    files_read: set[str],
+    files_written: set[str],
+    commands_executed: list[str],
+    network_requests: list[dict[str, Any]],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Build machine-readable operator summary for dashboards and alerting."""
+    observed = [r for r in network_requests if r.get("source") == "observed"]
+    inferred = [r for r in network_requests if r.get("source") == "inferred"]
+    blocked = [r for r in network_requests if not r.get("allowed")]
+    return {
+        "files_read_count": len(files_read),
+        "files_written_count": len(files_written),
+        "commands_count": len(commands_executed),
+        "network_observed_count": len(observed),
+        "network_inferred_count": len(inferred),
+        "network_blocked_count": len(blocked),
+        "blocked_destinations": sorted({r["destination"] for r in blocked}),
+        "warning_count": len(warnings),
+    }
+
+
 def _build_audit(
     task_id: str,
     started_at: str,
@@ -502,6 +537,7 @@ def _build_audit(
     estimated_cost_usd: float,
     warnings: list[str] | None = None,
 ) -> AuditLog:
+    w = warnings or []
     return AuditLog(
         task_id=task_id,
         started_at=started_at,
@@ -512,7 +548,14 @@ def _build_audit(
         network_requests=network_requests,
         tokens={"input": tokens_input, "output": tokens_output},
         estimated_cost_usd=estimated_cost_usd,
-        warnings=warnings or [],
+        warnings=w,
+        operator_summary=_build_operator_summary(
+            files_read,
+            files_written,
+            commands_executed,
+            network_requests,
+            w,
+        ),
     )
 
 

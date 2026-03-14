@@ -236,6 +236,7 @@ class Task(BaseModel):
 
 
 class AuditLog(BaseModel):
+    schema_version: str = "2"
     task_id: str
     started_at: str
     completed_at: str
@@ -246,6 +247,7 @@ class AuditLog(BaseModel):
     tokens: dict[str, int] = Field(default_factory=lambda: {"input": 0, "output": 0})
     estimated_cost_usd: float = 0.0
     warnings: list[str] = Field(default_factory=list)
+    operator_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class TranscriptEntry(BaseModel):
