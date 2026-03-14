@@ -334,7 +334,8 @@ def verify_session_cookie(cookie: str) -> AuthResult | None:
             token="",  # no raw token for session auth
             fingerprint="",
             is_legacy=False,
-            scopes=["tasks:approve", "tasks:read"],  # limited scope for sessions
+            # prs:create needed for the approval UI's "Approve and create PR" flow
+            scopes=["tasks:approve", "tasks:read", "prs:create"],
             token_name=None,
             user_id=payload.get("user_id"),
             username=payload.get("username"),

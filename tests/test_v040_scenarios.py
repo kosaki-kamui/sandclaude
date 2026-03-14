@@ -346,3 +346,33 @@ class TestApproveAndCreatePrScope:
             )
             # Should pass scope check (may fail on PR creation details, but not 403)
             assert resp.status_code != 403
+
+
+class TestSessionAuthApproveAndCreatePr:
+    async def test_session_user_can_approve_and_create_pr(self, client):
+        """GitHub OAuth session users should have prs:create for the approval UI flow."""
+        from unittest.mock import AsyncMock, patch
+
+        from sandclaude.auth import create_session_cookie
+
+        # Create a task in completed state
+        await db.create_task(
+            task_id="session-pr-1",
+            repo="https://github.com/test/repo",
+            prompt="test",
+        )
+        await db.update_task("session-pr-1", status=TaskStatus.completed)
+
+        # Create a session cookie (simulates GitHub OAuth login)
+        cookie = create_session_cookie(user_id=1, username="testuser")
+
+        with patch("sandclaude.api.prs.create_pr", new_callable=AsyncMock) as mock_pr:
+            mock_pr.return_value = {"pr_url": "https://github.com/test/repo/pull/1"}
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.post(
+                    "/tasks/session-pr-1/approve-and-create-pr",
+                    cookies={"sandclaude_session": cookie},
+                )
+                # Should NOT get 403 — session has prs:create
+                assert resp.status_code != 403
